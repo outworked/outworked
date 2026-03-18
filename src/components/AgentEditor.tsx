@@ -441,7 +441,7 @@ function SubagentTab({
         </label>
       </Field>
 
-      <Field label="MCP Servers (one per line: name or name:command)">
+      <Field label="MCP Servers (one per line: name or name:command or name:url)">
         <textarea
           value={mcpText}
           onChange={(e) => {
@@ -449,9 +449,34 @@ function SubagentTab({
             updateDef({ mcpServers: parseMcpServersText(e.target.value) });
           }}
           rows={3}
-          placeholder={"github\nplaywright: npx -y @playwright/mcp@latest"}
+          placeholder={"github\nplaywright: npx -y @playwright/mcp@latest\ncustom: https://mcp.example.com/sse"}
           className="input-mono resize-none text-[10px]"
         />
+        <div className="flex flex-wrap gap-1 mt-1">
+          {MCP_PRESETS.map((preset) => {
+            const alreadyAdded = mcpText.split('\n').some(l => l.trim().startsWith(preset.name + ':') || l.trim() === preset.name);
+            return (
+              <button
+                key={preset.name}
+                onClick={() => {
+                  if (alreadyAdded) return;
+                  const newText = mcpText ? mcpText.trimEnd() + '\n' + preset.value : preset.value;
+                  setMcpText(newText);
+                  updateDef({ mcpServers: parseMcpServersText(newText) });
+                }}
+                disabled={alreadyAdded}
+                className={`text-[9px] font-pixel px-1.5 py-0.5 rounded border ${
+                  alreadyAdded
+                    ? 'border-slate-700 text-slate-600 cursor-default'
+                    : 'border-purple-700/50 text-purple-300 hover:bg-purple-900/30 cursor-pointer'
+                }`}
+                title={preset.description}
+              >
+                {alreadyAdded ? '✓ ' : '+ '}{preset.name}
+              </button>
+            );
+          })}
+        </div>
       </Field>
 
       <Field label="Hooks (JSON)">
@@ -509,6 +534,18 @@ function SubagentTab({
     </div>
   );
 }
+
+/** Common MCP server presets for quick-add buttons */
+const MCP_PRESETS = [
+  { name: 'github', value: 'github: npx -y @modelcontextprotocol/server-github', description: 'GitHub repos, issues, PRs' },
+  { name: 'filesystem', value: 'filesystem: npx -y @modelcontextprotocol/server-filesystem', description: 'File system access' },
+  { name: 'postgres', value: 'postgres: npx -y @modelcontextprotocol/server-postgres', description: 'PostgreSQL database' },
+  { name: 'slack', value: 'slack: npx -y @anthropic/mcp-server-slack', description: 'Slack messages & channels' },
+  { name: 'linear', value: 'linear: npx -y @anthropic/mcp-server-linear', description: 'Linear issues & projects' },
+  { name: 'playwright', value: 'playwright: npx -y @playwright/mcp@latest', description: 'Browser automation & testing' },
+  { name: 'memory', value: 'memory: npx -y @modelcontextprotocol/server-memory', description: 'Persistent key-value memory' },
+  { name: 'fetch', value: 'fetch: npx -y @anthropic/mcp-server-fetch', description: 'HTTP fetching' },
+];
 
 /** Serialize mcpServers to a simple text format for editing */
 function serializeMcpServers(servers?: SubagentDef['mcpServers']): string {

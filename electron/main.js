@@ -584,6 +584,44 @@ function setupShellIPC() {
       args.push("--tools", options.tools);
     }
 
+    // MCP Servers — write inline definitions to a temp config file and pass --mcp-config
+    let mcpConfigPath = null;
+    if (options.mcpServers && options.mcpServers.length > 0) {
+      const mcpObj = {};
+      for (const entry of options.mcpServers) {
+        if (typeof entry === "string") {
+          // String reference — assume it's a globally-configured server name.
+          // We still include it so Claude Code knows to enable it for this session.
+          // Use an empty object as a placeholder; Claude Code will resolve from settings.
+          mcpObj[entry] = {};
+        } else {
+          for (const [name, cfg] of Object.entries(entry)) {
+            mcpObj[name] = {};
+            if (cfg.type) mcpObj[name].type = cfg.type;
+            if (cfg.command) mcpObj[name].command = cfg.command;
+            if (cfg.args) mcpObj[name].args = cfg.args;
+            if (cfg.url) mcpObj[name].url = cfg.url;
+          }
+        }
+      }
+      if (Object.keys(mcpObj).length > 0) {
+        const tmpDir = path.join(app.getPath("temp"), "outworked-mcp");
+        try {
+          fs.mkdirSync(tmpDir, { recursive: true });
+        } catch { /* best effort */ }
+        mcpConfigPath = path.join(tmpDir, `mcp-${reqId}.json`);
+        fs.writeFileSync(
+          mcpConfigPath,
+          JSON.stringify({ mcpServers: mcpObj }, null, 2),
+          { mode: FILE_MODE },
+        );
+        args.push("--mcp-config", mcpConfigPath);
+        console.log(
+          `[claude-code:startAdvanced] MCP config written to ${mcpConfigPath}`,
+        );
+      }
+    }
+
     // Agent teams — enabled via env var CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
 
     const envVars = augmentedEnv({
@@ -662,8 +700,16 @@ function setupShellIPC() {
       }
     });
 
+    // Helper to clean up temp MCP config file
+    function cleanupMcpConfig() {
+      if (mcpConfigPath) {
+        try { fs.unlinkSync(mcpConfigPath); } catch { /* already gone */ }
+      }
+    }
+
     proc.on("error", (err) => {
       claudeProcs.delete(reqId);
+      cleanupMcpConfig();
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("claude-code:done", reqId, -1, err.message);
       }
@@ -671,6 +717,7 @@ function setupShellIPC() {
 
     proc.on("close", (code) => {
       claudeProcs.delete(reqId);
+      cleanupMcpConfig();
       if (code !== 0) {
         console.error(
           `[claude-code:startAdvanced] reqId=${reqId} exited with code ${code}`,
@@ -1497,6 +1544,177 @@ function setupGitIPC() {
       // No local changes – use HEAD as the baseline.
       const head = git("git rev-parse HEAD", cwd);
       return { ok: true, ref: head };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Return current branch name and list of local branches.
+  ipcMain.handle("git:branchInfo", (_event, dir) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const current = git("git rev-parse --abbrev-ref HEAD", cwd);
+      const raw = git("git branch --format='%(refname:short)'", cwd);
+      const branches = raw.split("\n").filter(Boolean);
+      // Try to get remote tracking info
+      let remote = "";
+      let ahead = 0;
+      let behind = 0;
+      try {
+        remote = git("git rev-parse --abbrev-ref --symbolic-full-name @{u}", cwd);
+        const counts = git('git rev-list --left-right --count HEAD...@{u}', cwd);
+        const [a, b] = counts.split(/\s+/);
+        ahead = parseInt(a, 10) || 0;
+        behind = parseInt(b, 10) || 0;
+      } catch { /* no remote tracking */ }
+      return { ok: true, current, branches, remote, ahead, behind };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Stage files (git add).
+  ipcMain.handle("git:stage", (_event, dir, files) => {
+    const cwd = dir || workspaceDir;
+    try {
+      if (!files || files.length === 0) {
+        git("git add -A", cwd);
+      } else {
+        for (const f of files) {
+          git(`git add -- "${f}"`, cwd);
+        }
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Unstage files (git reset HEAD).
+  ipcMain.handle("git:unstage", (_event, dir, files) => {
+    const cwd = dir || workspaceDir;
+    try {
+      if (!files || files.length === 0) {
+        git("git reset HEAD", cwd);
+      } else {
+        for (const f of files) {
+          git(`git reset HEAD -- "${f}"`, cwd);
+        }
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Get staged diff separately.
+  ipcMain.handle("git:diffStaged", (_event, dir, filepath) => {
+    const cwd = dir || workspaceDir;
+    try {
+      let cmd = "git diff --cached";
+      if (filepath) cmd += ` -- "${filepath}"`;
+      const diff = git(cmd, cwd);
+      return { ok: true, diff };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Commit staged changes.
+  ipcMain.handle("git:commit", (_event, dir, message) => {
+    const cwd = dir || workspaceDir;
+    try {
+      if (!message || !message.trim()) {
+        return { ok: false, error: "Commit message is required" };
+      }
+      // Use -m with the message; escape double quotes in the message
+      const escaped = message.replace(/"/g, '\\"');
+      const output = git(`git commit -m "${escaped}"`, cwd);
+      return { ok: true, output };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Create and switch to a new branch.
+  ipcMain.handle("git:createBranch", (_event, dir, branchName) => {
+    const cwd = dir || workspaceDir;
+    try {
+      if (!branchName || !branchName.trim()) {
+        return { ok: false, error: "Branch name is required" };
+      }
+      const safe = branchName.trim().replace(/[^a-zA-Z0-9._\-\/]/g, "-");
+      git(`git checkout -b "${safe}"`, cwd);
+      return { ok: true, branch: safe };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Switch to an existing branch.
+  ipcMain.handle("git:checkoutBranch", (_event, dir, branchName) => {
+    const cwd = dir || workspaceDir;
+    try {
+      git(`git checkout "${branchName}"`, cwd);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Push current branch to remote.
+  ipcMain.handle("git:push", (_event, dir, setUpstream) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const branch = git("git rev-parse --abbrev-ref HEAD", cwd);
+      let cmd = "git push";
+      if (setUpstream) cmd += ` -u origin "${branch}"`;
+      const output = git(cmd, cwd);
+      return { ok: true, output };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Create a pull request using gh CLI.
+  ipcMain.handle("git:createPr", (_event, dir, title, body, baseBranch) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const escaped_title = title.replace(/"/g, '\\"');
+      const escaped_body = (body || "").replace(/"/g, '\\"');
+      let cmd = `gh pr create --title "${escaped_title}" --body "${escaped_body}"`;
+      if (baseBranch) cmd += ` --base "${baseBranch}"`;
+      const output = git(cmd, cwd);
+      return { ok: true, output, url: output.trim() };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Get status with separate staged/unstaged tracking.
+  ipcMain.handle("git:statusDetailed", (_event, dir) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const raw = git("git status --porcelain", cwd);
+      const staged = [];
+      const unstaged = [];
+      const untracked = [];
+      for (const line of raw.split("\n").filter(Boolean)) {
+        const x = line[0]; // index status
+        const y = line[1]; // worktree status
+        const filepath = line.slice(3);
+        if (x === '?' && y === '?') {
+          untracked.push({ status: '??', path: filepath });
+        } else {
+          if (x !== ' ' && x !== '?') {
+            staged.push({ status: x, path: filepath });
+          }
+          if (y !== ' ' && y !== '?') {
+            unstaged.push({ status: y, path: filepath });
+          }
+        }
+      }
+      return { ok: true, staged, unstaged, untracked };
     } catch (err) {
       return { ok: false, error: err.message };
     }

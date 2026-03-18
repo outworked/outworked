@@ -191,6 +191,7 @@ async function callClaudeCodeAdvanced(
     disallowedTools: subDef?.disallowedTools,
     maxTurns: subDef?.maxTurns,
     permissionMode: (subDef?.permissionMode as ClaudeCodeAdvancedOptions['permissionMode']) || 'acceptEdits',
+    mcpServers: subDef?.mcpServers,
     continueSession: !!agent?.sessionId,
     resumeSessionId: agent?.sessionId,
   };

@@ -55,6 +55,7 @@ export interface ClaudeCodeAdvancedOptions {
   verbose?: boolean;
   permissionMode?: 'default' | 'acceptEdits' | 'dontAsk' | 'bypassPermissions' | 'plan';
   dangerouslySkipPermissions?: boolean;
+  mcpServers?: SubagentDef['mcpServers']; // MCP servers to make available to this session
   tools?: string; // restrict built-in tools e.g. "Bash,Edit,Read"
   enableAgentTeams?: boolean;
   teammateMode?: 'auto' | 'in-process' | 'tmux';
@@ -146,10 +147,20 @@ interface ElectronAPI {
   };
   git?: {
     status: (cwd?: string) => Promise<GitStatusResult>;
+    statusDetailed: (cwd?: string) => Promise<GitStatusDetailedResult>;
     diff: (cwd?: string, ref?: string, filepath?: string) => Promise<GitDiffResult>;
+    diffStaged: (cwd?: string, filepath?: string) => Promise<GitDiffResult>;
     diffStat: (cwd?: string) => Promise<{ ok: boolean; stat?: string; error?: string }>;
     log: (cwd?: string) => Promise<{ ok: boolean; log?: string; error?: string }>;
     stashRef: (cwd?: string) => Promise<{ ok: boolean; ref?: string; error?: string }>;
+    branchInfo: (cwd?: string) => Promise<GitBranchInfoResult>;
+    stage: (cwd?: string, files?: string[]) => Promise<{ ok: boolean; error?: string }>;
+    unstage: (cwd?: string, files?: string[]) => Promise<{ ok: boolean; error?: string }>;
+    commit: (cwd?: string, message?: string) => Promise<{ ok: boolean; output?: string; error?: string }>;
+    createBranch: (cwd?: string, name?: string) => Promise<{ ok: boolean; branch?: string; error?: string }>;
+    checkoutBranch: (cwd?: string, name?: string) => Promise<{ ok: boolean; error?: string }>;
+    push: (cwd?: string, setUpstream?: boolean) => Promise<{ ok: boolean; output?: string; error?: string }>;
+    createPr: (cwd?: string, title?: string, body?: string, baseBranch?: string) => Promise<{ ok: boolean; output?: string; url?: string; error?: string }>;
   };
 }
 
@@ -627,4 +638,82 @@ export async function gitStashRef(cwd?: string): Promise<{ ok: boolean; ref?: st
   const api = getAPI();
   if (!api?.git) return { ok: false, error: 'Not in Electron' };
   return api.git.stashRef(cwd);
+}
+
+export interface GitBranchInfoResult {
+  ok: boolean;
+  current?: string;
+  branches?: string[];
+  remote?: string;
+  ahead?: number;
+  behind?: number;
+  error?: string;
+}
+
+export interface GitStatusDetailedResult {
+  ok: boolean;
+  staged?: GitStatusFile[];
+  unstaged?: GitStatusFile[];
+  untracked?: GitStatusFile[];
+  error?: string;
+}
+
+export async function gitStatusDetailed(cwd?: string): Promise<GitStatusDetailedResult> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.statusDetailed(cwd);
+}
+
+export async function gitDiffStaged(cwd?: string, filepath?: string): Promise<GitDiffResult> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.diffStaged(cwd, filepath);
+}
+
+export async function gitBranchInfo(cwd?: string): Promise<GitBranchInfoResult> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.branchInfo(cwd);
+}
+
+export async function gitStage(cwd?: string, files?: string[]): Promise<{ ok: boolean; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.stage(cwd, files);
+}
+
+export async function gitUnstage(cwd?: string, files?: string[]): Promise<{ ok: boolean; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.unstage(cwd, files);
+}
+
+export async function gitCommit(cwd?: string, message?: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.commit(cwd, message);
+}
+
+export async function gitCreateBranch(cwd?: string, name?: string): Promise<{ ok: boolean; branch?: string; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.createBranch(cwd, name);
+}
+
+export async function gitCheckoutBranch(cwd?: string, name?: string): Promise<{ ok: boolean; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.checkoutBranch(cwd, name);
+}
+
+export async function gitPush(cwd?: string, setUpstream?: boolean): Promise<{ ok: boolean; output?: string; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.push(cwd, setUpstream);
+}
+
+export async function gitCreatePr(cwd?: string, title?: string, body?: string, baseBranch?: string): Promise<{ ok: boolean; output?: string; url?: string; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.createPr(cwd, title, body, baseBranch);
 }

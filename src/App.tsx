@@ -16,10 +16,11 @@ import ClaudeCodeStatus from './components/ClaudeCodeStatus';
 import WorkspacePicker from './components/WorkspacePicker';
 import PermissionsPanel, { PermissionsBanner } from './components/PermissionsPanel';
 import WorkspacePanel from './components/WorkspacePanel';
+import GitPanel from './components/GitPanel';
 
 const OfficeCanvas = lazy(() => import('./components/OfficeCanvas'));
 
-type RightPanel = 'chat' | 'editor' | 'terminal' | 'workspace' | 'instructions' | 'tasks';
+type RightPanel = 'chat' | 'editor' | 'terminal' | 'workspace' | 'git' | 'instructions' | 'tasks';
 
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -446,45 +447,43 @@ export default function App() {
 
       <aside className="w-80 shrink-0 border-l border-slate-700 flex flex-col bg-slate-900/95 overflow-hidden">
         <PermissionsBanner workspace={workspaceDir} />
-        <div className="flex border-b border-gray-800">
-          <button
-            onClick={() => setRightPanel('chat')}
-            className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === 'chat' ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
-          >
-            Chat
-          </button>
+        <div className="border-b border-gray-800">
+          {/* Row 1: global tabs — always visible */}
+          <div className="flex">
+            {(['chat', 'workspace', 'git', 'terminal'] as const).map((key) => {
+              const label = key === 'workspace' ? 'Files' : key === 'terminal' ? 'Term' : key === 'git' ? 'Git' : 'Chat';
+              return (
+                <button
+                  key={key}
+                  onClick={() => setRightPanel(key)}
+                  className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === key ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          {/* Row 2: agent-contextual tabs — only when an agent is selected */}
           {selectedAgent && (
-            <button
-              onClick={() => setRightPanel('editor')}
-              className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === 'editor' ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
-            >
-              Config
-            </button>
+            <div className="flex items-center border-t border-gray-800/50">
+              <span className="text-[10px] font-pixel text-slate-400 pl-2 pr-1 py-1.5 shrink-0 truncate max-w-[40%]" style={{ color: selectedAgent.color }}>{selectedAgent.name}</span>
+              {(['editor', 'tasks'] as const).map((key) => {
+                const label = key === 'editor' ? 'Config' : 'Tasks';
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setRightPanel(key)}
+                    className={`flex-1 py-1.5 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === key ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
           )}
-          {selectedAgent && (
-            <button
-              onClick={() => setRightPanel('tasks')}
-              className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === 'tasks' ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
-            >
-              Tasks
-            </button>
-          )}
-          <button
-            onClick={() => setRightPanel('workspace')}
-            className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === 'workspace' ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
-          >
-            Files
-          </button>
-          <button
-            onClick={() => setRightPanel('terminal')}
-            className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === 'terminal' ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
-          >
-            Term
-          </button>
-
         </div>
         <div className="flex-1 overflow-hidden relative">
-          {rightPanel !== 'terminal' && rightPanel !== 'workspace' && (
+          {rightPanel !== 'terminal' && rightPanel !== 'workspace' && rightPanel !== 'git' && (
             rightPanel === 'chat' ? (
               <ChatWindow
                 agent={selectedAgent}
@@ -514,6 +513,10 @@ export default function App() {
           {/* Workspace panel — always mounted to preserve watcher; hidden when not active */}
           <div className={`absolute inset-0 ${rightPanel === 'workspace' ? '' : 'invisible pointer-events-none'}`}>
             <WorkspacePanel workspaceDir={workspaceDir} />
+          </div>
+          {/* Git panel — always mounted to preserve state; hidden when not active */}
+          <div className={`absolute inset-0 ${rightPanel === 'git' ? '' : 'invisible pointer-events-none'}`}>
+            <GitPanel workspaceDir={workspaceDir} />
           </div>
           {/* Terminal is always mounted to preserve shell session; hidden when not active */}
           <div className={`absolute inset-0 ${rightPanel === 'terminal' ? '' : 'invisible pointer-events-none'}`}>

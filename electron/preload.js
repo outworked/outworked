@@ -153,10 +153,25 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Git operations
   git: {
     status: (cwd) => ipcRenderer.invoke("git:status", cwd),
+    statusDetailed: (cwd) => ipcRenderer.invoke("git:statusDetailed", cwd),
     diff: (cwd, ref, filepath) =>
       ipcRenderer.invoke("git:diff", cwd, ref, filepath),
+    diffStaged: (cwd, filepath) =>
+      ipcRenderer.invoke("git:diffStaged", cwd, filepath),
     diffStat: (cwd) => ipcRenderer.invoke("git:diffStat", cwd),
     log: (cwd) => ipcRenderer.invoke("git:log", cwd),
     stashRef: (cwd) => ipcRenderer.invoke("git:stashRef", cwd),
+    branchInfo: (cwd) => ipcRenderer.invoke("git:branchInfo", cwd),
+    stage: (cwd, files) => ipcRenderer.invoke("git:stage", cwd, files),
+    unstage: (cwd, files) => ipcRenderer.invoke("git:unstage", cwd, files),
+    commit: (cwd, message) => ipcRenderer.invoke("git:commit", cwd, message),
+    createBranch: (cwd, name) =>
+      ipcRenderer.invoke("git:createBranch", cwd, name),
+    checkoutBranch: (cwd, name) =>
+      ipcRenderer.invoke("git:checkoutBranch", cwd, name),
+    push: (cwd, setUpstream) =>
+      ipcRenderer.invoke("git:push", cwd, setUpstream),
+    createPr: (cwd, title, body, baseBranch) =>
+      ipcRenderer.invoke("git:createPr", cwd, title, body, baseBranch),
   },
 });
