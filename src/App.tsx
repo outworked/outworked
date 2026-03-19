@@ -19,6 +19,7 @@ import WorkspacePanel from './components/WorkspacePanel';
 import GitPanel from './components/GitPanel';
 import CostDashboard from './components/CostDashboard';
 import NotificationCenter, { NotificationToast } from './components/NotificationCenter';
+import OnboardingModal from './components/OnboardingModal';
 import { AppNotification, showDesktopNotification } from './lib/notifications';
 import { playTaskComplete, playApprovalNeeded, playAgentStuck, playOrchestrationComplete, playOrchestrationWarning, getSoundsEnabled } from './lib/sounds';
 import { sendClaudeCodeInput, PermissionRequest } from './lib/terminal';
@@ -47,6 +48,7 @@ export default function App() {
   const [orchToast, setOrchToast] = useState<OrchestrationDoneEvent | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [latestToast, setLatestToast] = useState<AppNotification | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('outworked_onboarding_done'));
 
   useEffect(() => {
     async function init() {
@@ -375,6 +377,16 @@ export default function App() {
     // Re-sync to pick up project-level agents
     const synced = await syncClaudeSubagents(agents, dir);
     if (synced !== agents) setAgents(synced);
+    // Re-check permissions for the new workspace
+    setPermsDismissed(false);
+    try {
+      const { settings } = await readClaudeSettings('project');
+      const perms = settings.permissions || { allow: [], deny: [] };
+      const empty = (!perms.allow || perms.allow.length === 0) && (!perms.deny || perms.deny.length === 0);
+      setPermsEmpty(empty);
+    } catch {
+      setPermsEmpty(true);
+    }
   }
 
   return (
@@ -540,14 +552,22 @@ export default function App() {
               )}
               {/* Active agents */}
               <div className="flex gap-4 overflow-x-auto">
-                {agents.filter((a) => a.status !== 'idle' && a.status !== 'stuck' && a.status !== 'waiting-input' && a.status !== 'waiting-approval' && a.currentThought).map((a) => (
-                  <div key={a.id} className="flex items-center gap-1.5 shrink-0">
-                    <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: a.color }} />
-                    <span className="text-[10px] font-pixel text-slate-300">
-                      <span style={{ color: a.color }}>{a.name}:</span>{' '}
-                      {a.currentThought.slice(0, 50)}{a.currentThought.length > 50 ? '...' : ''}
+                {agents.filter((a) => a.status !== 'idle' && a.status !== 'stuck' && a.status !== 'waiting-input' && a.status !== 'waiting-approval').map((a) => (
+                  <button key={a.id} onClick={() => handleAgentClick(a)} className="flex items-center gap-1.5 shrink-0 group hover:bg-slate-800/50 rounded px-1.5 py-0.5 transition-colors">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: a.color }} />
+                      <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: a.color }} />
                     </span>
-                  </div>
+                    <span className="text-[10px] font-pixel text-slate-300">
+                      <span style={{ color: a.color }}>{a.name}</span>
+                      {a.currentThought && (
+                        <>
+                          <span className="text-slate-600 mx-1">·</span>
+                          <span className="text-slate-400">{a.currentThought.slice(0, 60)}{a.currentThought.length > 60 ? '…' : ''}</span>
+                        </>
+                      )}
+                    </span>
+                  </button>
                 ))}
                 {agents.every((a) => a.status === 'idle' || !a.currentThought) && (
                   <span className="text-[10px] font-pixel text-slate-400">
@@ -682,6 +702,17 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {showOnboarding && startupDone && (
+        <OnboardingModal
+          onComplete={() => {
+            localStorage.setItem('outworked_onboarding_done', '1');
+            setShowOnboarding(false);
+          }}
+          onOpenPerms={() => setShowPermsModal(true)}
+          permsModalOpen={showPermsModal}
+        />
       )}
 
       {permsEmpty && !permsDismissed && !showPermsModal && workspaceDir && (

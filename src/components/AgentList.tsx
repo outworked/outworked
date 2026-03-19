@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from 'react';
 import { Agent } from '../lib/types';
 
 interface AgentListProps {
@@ -15,6 +16,7 @@ const STATUS_COLORS: Record<string, string> = {
   'waiting-input': '#f97316',
   'waiting-approval': '#eab308',
   stuck: '#ef4444',
+  collaborating: '#8b5cf6',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -22,12 +24,35 @@ const STATUS_LABELS: Record<string, string> = {
   thinking: 'Thinking…',
   working: 'Working…',
   speaking: 'Responding…',
+  collaborating: 'Collaborating…',
   'waiting-input': '⏸ Needs input',
   'waiting-approval': '🔒 Needs approval',
   stuck: '⚠ Stuck',
 };
 
 export default function AgentList({ agents, selectedAgentId, onSelect, onAdd }: AgentListProps) {
+  const [now, setNow] = useState(Date.now());
+  const statusStartRef = useRef<Record<string, number>>({});
+
+  // Track when agents enter non-idle states
+  useEffect(() => {
+    for (const agent of agents) {
+      if (agent.status !== 'idle' && !statusStartRef.current[agent.id]) {
+        statusStartRef.current[agent.id] = Date.now();
+      } else if (agent.status === 'idle') {
+        delete statusStartRef.current[agent.id];
+      }
+    }
+  }, [agents]);
+
+  // Tick every second while any agent is non-idle
+  useEffect(() => {
+    const hasActive = agents.some(a => a.status !== 'idle');
+    if (!hasActive) return;
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [agents]);
+
   return (
     <div className="flex flex-col h-[45vh]">
       <div className="flex items-center justify-between gap-3 px-3 py-2 border-b border-slate-600">
@@ -74,8 +99,19 @@ export default function AgentList({ agents, selectedAgentId, onSelect, onAdd }: 
                   {STATUS_LABELS[agent.status]}
                 </span>
               )}
+              {(agent.status === 'thinking' || agent.status === 'working' || agent.status === 'speaking' || agent.status === 'collaborating') && statusStartRef.current[agent.id] && (
+                <span className="text-[9px] font-mono text-slate-500">
+                  {(() => {
+                    const secs = Math.floor((now - statusStartRef.current[agent.id]) / 1000);
+                    if (secs < 60) return `${secs}s`;
+                    const m = Math.floor(secs / 60);
+                    const s = secs % 60;
+                    return `${m}m ${s}s`;
+                  })()}
+                </span>
+              )}
               <div
-                className={`w-2 h-2 rounded-full ${agent.status === 'waiting-input' || agent.status === 'waiting-approval' || agent.status === 'stuck' ? 'animate-pulse' : ''}`}
+                className={`w-2 h-2 rounded-full ${agent.status === 'waiting-input' || agent.status === 'waiting-approval' || agent.status === 'stuck' ? 'animate-pulse' : agent.status !== 'idle' ? 'animate-pulse' : ''}`}
                 style={{ backgroundColor: STATUS_COLORS[agent.status] ?? '#6b7280' }}
                 title={STATUS_LABELS[agent.status] ?? agent.status}
               />

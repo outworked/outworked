@@ -30,6 +30,35 @@ interface ChatWindowProps {
 
 const EMPTY_KEYS = { openai: '', anthropic: '', gemini: '', github: '' };
 
+const STATUS_COLORS: Record<string, string> = {
+  idle: '#6b7280',
+  thinking: '#f59e0b',
+  working: '#22c55e',
+  speaking: '#3b82f6',
+  'waiting-input': '#f97316',
+  'waiting-approval': '#eab308',
+  stuck: '#ef4444',
+  collaborating: '#8b5cf6',
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  idle: 'Idle',
+  thinking: 'Thinking…',
+  working: 'Working…',
+  speaking: 'Responding…',
+  collaborating: 'Collaborating…',
+  'waiting-input': 'Needs input',
+  'waiting-approval': 'Needs approval',
+  stuck: 'Stuck',
+};
+
+function formatElapsed(secs: number): string {
+  if (secs < 60) return `${secs}s`;
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}m ${s}s`;
+}
+
 export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAddAgent, agentTeamsEnabled, onOrchestrationDone, onPermissionNotification, debugMode }: ChatWindowProps) {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -41,6 +70,8 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
   const [showHistory, setShowHistory] = useState(false);
   const [sessionList, setSessionList] = useState<SessionMeta[]>([]);
   const [sessionSearch, setSessionSearch] = useState('');
+  const [workStartedAt, setWorkStartedAt] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -55,6 +86,13 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
   useEffect(() => {
     if (debugMode) setShowDebug(true);
   }, [debugMode]);
+
+  // Elapsed timer — ticks every second while streaming
+  useEffect(() => {
+    if (!workStartedAt) { setElapsed(0); return; }
+    const interval = setInterval(() => setElapsed(Math.floor((Date.now() - workStartedAt) / 1000)), 1000);
+    return () => clearInterval(interval);
+  }, [workStartedAt]);
 
   // Load session list when history panel opens or agent changes
   const refreshSessionList = useCallback(async () => {
@@ -154,6 +192,7 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
     if (!input.trim() || isStreaming || !agent) return;
     const userText = input.trim();
     setInput('');
+    setWorkStartedAt(Date.now());
     setIsStreaming(true);
     setStreamingText('');
     setToolCalls([]);
@@ -223,6 +262,7 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
     } finally {
       setIsStreaming(false);
       setStreamingText('');
+      setWorkStartedAt(null);
       abortRef.current = null;
     }
 
@@ -806,9 +846,18 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
           </div>
         </div>
       )}
-      {agent.currentThought && agent.status !== 'stuck' && agent.status !== 'waiting-input' && agent.status !== 'waiting-approval' && (
-        <div className="px-3 py-1.5 bg-slate-800 border-b border-slate-600">
-          <p className="text-[11px] font-mono text-yellow-400 truncate">💭 {agent.currentThought}</p>
+      {agent.status !== 'idle' && agent.status !== 'stuck' && agent.status !== 'waiting-input' && agent.status !== 'waiting-approval' && (isStreaming || agent.currentThought) && (
+        <div className="px-3 py-1.5 bg-slate-800/80 border-b border-slate-700/40 flex items-center gap-2">
+          <span className="relative flex h-2 w-2 shrink-0">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: STATUS_COLORS[agent.status] ?? '#f59e0b' }}></span>
+            <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: STATUS_COLORS[agent.status] ?? '#f59e0b' }}></span>
+          </span>
+          <p className="text-[11px] font-mono truncate flex-1" style={{ color: STATUS_COLORS[agent.status] ?? '#f59e0b' }}>
+            {agent.currentThought || STATUS_LABELS[agent.status] || 'Working…'}
+          </p>
+          {isStreaming && elapsed > 0 && (
+            <span className="text-[10px] font-mono text-slate-500 shrink-0">{formatElapsed(elapsed)}</span>
+          )}
         </div>
       )}
 
@@ -870,46 +919,73 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
             </div>
           );
         })}
-        {isStreaming && toolCalls.length > 0 && (
-          <details className="mx-1">
-            <summary className="text-[10px] font-pixel text-slate-400 cursor-pointer hover:text-slate-300 flex items-center gap-1.5 py-0.5">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-              {toolCalls.length} tool call{toolCalls.length !== 1 ? 's' : ''}
-            </summary>
-            <div className="ml-3 mt-1 space-y-0.5 border-l border-slate-700 pl-2">
-              {toolCalls.map((tc, i) => (
-                <div key={i} className="text-[10px] font-mono text-slate-500 flex items-center gap-1.5">
-                  <span className="text-amber-500/70">{'>'}</span>
-                  <span className="text-slate-400">{tc.args}</span>
+        {isStreaming && (
+          <div className="space-y-2">
+            {/* Activity feed - always visible while working */}
+            <div className="mx-1 rounded-lg border border-slate-700/50 bg-slate-800/50 overflow-hidden">
+              {/* Header with elapsed time and phase */}
+              <div className="flex items-center justify-between px-2.5 py-1.5 bg-slate-800/80 border-b border-slate-700/30">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-400"></span>
+                  </span>
+                  <span className="text-[10px] font-pixel text-slate-300">
+                    {toolCalls.length > 0 ? 'Working' : 'Thinking'}
+                  </span>
                 </div>
-              ))}
-            </div>
-          </details>
-        )}
-        {isStreaming && streamingText && (
-          <div className="flex justify-start">
-            <div className={`max-w-[85%] px-2.5 py-1.5 rounded text-[12px] leading-relaxed ${
-              streamingText.includes('completed successfully')
-                ? 'bg-emerald-950/30 border border-emerald-600/40 text-gray-100'
-                : 'bg-slate-700 text-gray-100'
-            }`}>
-              <MarkdownMessage content={streamingText} />
-              {!streamingText.includes('completed successfully') && !streamingText.includes('tasks completed') && (
-                <span className="inline-block w-1.5 h-3 bg-gray-400 ml-0.5 animate-pulse align-middle" />
+                <span className="text-[10px] font-mono text-slate-500">{formatElapsed(elapsed)}</span>
+              </div>
+
+              {/* Tool call feed */}
+              {toolCalls.length > 0 && (
+                <div className="max-h-32 overflow-y-auto">
+                  {toolCalls.map((tc, i) => {
+                    const isLatest = i === toolCalls.length - 1;
+                    return (
+                      <div key={i} className={`flex items-center gap-2 px-2.5 py-1 border-b border-slate-800/30 last:border-b-0 ${isLatest ? 'bg-slate-700/30' : ''}`}>
+                        {isLatest ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                        ) : (
+                          <span className="w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0" />
+                        )}
+                        <span className={`text-[10px] font-mono truncate ${isLatest ? 'text-slate-300' : 'text-slate-500'}`}>
+                          {tc.args}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* No tool calls yet - show pulsing indicator */}
+              {toolCalls.length === 0 && !streamingText && (
+                <div className="px-2.5 py-2 flex items-center gap-2">
+                  <div className="flex gap-1">
+                    <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </div>
+                  <span className="text-[10px] font-mono text-slate-500">Processing request…</span>
+                </div>
               )}
             </div>
-          </div>
-        )}
-        {isStreaming && !streamingText && (
-          <div className="flex justify-start">
-            <div className="px-2.5 py-1.5 rounded bg-slate-700 flex items-center gap-2">
-              <span className="flex gap-0.5">
-                <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '150ms' }} />
-                <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '300ms' }} />
-              </span>
-              <span className="text-[11px] font-mono text-slate-400">thinking...</span>
-            </div>
+
+            {/* Streaming text output */}
+            {streamingText && (
+              <div className="flex justify-start">
+                <div className={`max-w-[85%] px-2.5 py-1.5 rounded text-[12px] leading-relaxed ${
+                  streamingText.includes('completed successfully')
+                    ? 'bg-emerald-950/30 border border-emerald-600/40 text-gray-100'
+                    : 'bg-slate-700 text-gray-100'
+                }`}>
+                  <MarkdownMessage content={streamingText} />
+                  {!streamingText.includes('completed successfully') && !streamingText.includes('tasks completed') && (
+                    <span className="inline-block w-1.5 h-3 bg-gray-400 ml-0.5 animate-pulse align-middle" />
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
         {pendingPermission && (

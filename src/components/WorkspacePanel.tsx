@@ -5,6 +5,7 @@ import {
   watchWorkspace,
   onFileTreeChanged,
   onFileChanged,
+  gitIsRepo,
   gitStatus,
   gitDiff,
   gitDiffStat,
@@ -131,6 +132,7 @@ export default function WorkspacePanel({ workspaceDir }: WorkspacePanelProps) {
   const [diffStatContent, setDiffStatContent] = useState<string>('');
   const [recentChanges, setRecentChanges] = useState<{ file: string; type: string; time: number }[]>([]);
   const [loading, setLoading] = useState(false);
+  const isRepoRef = useRef<boolean | null>(null);
   const mountedRef = useRef(true);
 
   // Load files
@@ -142,6 +144,8 @@ export default function WorkspacePanel({ workspaceDir }: WorkspacePanelProps) {
   // Load git status
   const refreshGitStatus = useCallback(async () => {
     if (!workspaceDir) return;
+    if (isRepoRef.current === null) isRepoRef.current = await gitIsRepo(workspaceDir);
+    if (!isRepoRef.current) return;
     const result = await gitStatus(workspaceDir);
     if (!mountedRef.current) return;
     if (result.ok && result.files) {
@@ -157,6 +161,8 @@ export default function WorkspacePanel({ workspaceDir }: WorkspacePanelProps) {
   // Load diff stat
   const refreshDiffStat = useCallback(async () => {
     if (!workspaceDir) return;
+    if (isRepoRef.current === null) isRepoRef.current = await gitIsRepo(workspaceDir);
+    if (!isRepoRef.current) return;
     const result = await gitDiffStat(workspaceDir);
     if (mountedRef.current && result.ok) {
       setDiffStatContent(result.stat || '');
@@ -166,6 +172,7 @@ export default function WorkspacePanel({ workspaceDir }: WorkspacePanelProps) {
   // Initial load + set up watcher
   useEffect(() => {
     mountedRef.current = true;
+    isRepoRef.current = null; // reset cache on workspace change
     refreshFiles();
     refreshGitStatus();
     refreshDiffStat();

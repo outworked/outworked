@@ -11,25 +11,10 @@ function buildToolPreamble(workspace: string): string {
 Your working directory is: ${workspace}
 All file operations and shell commands run in this directory by default.
 
-## Tools
-You have access to the local filesystem, sandboxed code execution, and a local terminal.
-- write_file: Save code/content to a file in the workspace
-- read_file: Read an existing file from the workspace
-- list_files: List files in the workspace directory
-- execute_code: Run JavaScript and see output
-- delete_file: Remove a file from the workspace
-- run_command: Run a shell command (npm install, git, ls, etc.) — runs in workspace by default
-- update_todos: Create/update your task checklist (call at START of any non-trivial task)
-- assign_task: (Boss only) Delegate a task to an employee — they will execute it autonomously
-
-Workflow: For multi-step tasks, ALWAYS call update_todos first to plan, then work through each step, updating todo statuses as you go. When coding: 1) plan with update_todos, 2) write files, 3) run_command to test, 4) mark todos done.
-
 ## Asking Colleagues
 If you need information or expertise from a colleague, include this exact format in your response:
 [ASK:ColleagueName] Your question here
 The system will route your question and provide their answer before your next step. Only ask when you genuinely need their input.
-When writing code for a website, always start the frontend in dev mode to present it to the user right away, then iterate based on feedback. 
-You can have multiple files open at once, but only one terminal command running at a time. Use the terminal for any command you would normally run in a shell, including starting dev servers, git commands, and npm installs.
 `;
 }
 
@@ -165,11 +150,23 @@ async function callClaudeCode(
   onPermissionRequest?: SendOptions['onPermissionRequest'],
   onStderr?: SendOptions['onStderr'],
 ): Promise<SendMessageResult> {
-  // Build a single prompt from conversation history
+  // When resuming a session, only send the latest user message — Claude Code
+  // already has the conversation history from the session.  Sending the full
+  // history again doubles input tokens and significantly slows responses.
   let prompt = '';
-  for (const msg of messages) {
-    if (msg.role === 'user') prompt += `Human: ${msg.content}\n\n`;
-    else if (msg.role === 'assistant') prompt += `Assistant: ${msg.content}\n\n`;
+  if (agent?.sessionId && messages.length > 0) {
+    // Find the last user message
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        prompt = messages[i].content;
+        break;
+      }
+    }
+  } else {
+    for (const msg of messages) {
+      if (msg.role === 'user') prompt += `Human: ${msg.content}\n\n`;
+      else if (msg.role === 'assistant') prompt += `Assistant: ${msg.content}\n\n`;
+    }
   }
 
   const workspace = await getWorkspace();
@@ -218,20 +215,22 @@ async function callClaudeCodeAdvanced(
   onStderr?: SendOptions['onStderr'],
 ): Promise<SendMessageResult> {
   const subDef = agent?.subagentDef;
+  const isResume = !!agent?.sessionId;
 
   const options: ClaudeCodeAdvancedOptions = {
     prompt,
     cwd: workspace,
-    systemPrompt: system,
+    // Skip system prompt on resumed sessions — Claude Code already has it
+    // from the initial session. Re-sending it wastes input tokens.
+    ...(isResume ? {} : { systemPrompt: system }),
     outputFormat: 'stream-json',
-    verbose: true,
     model: subDef?.model || undefined,
     allowedTools: subDef?.tools,
     disallowedTools: subDef?.disallowedTools,
     maxTurns: subDef?.maxTurns,
     permissionMode: (subDef?.permissionMode as ClaudeCodeAdvancedOptions['permissionMode']) || 'acceptEdits',
     mcpServers: subDef?.mcpServers,
-    continueSession: !!agent?.sessionId,
+    continueSession: isResume,
     resumeSessionId: agent?.sessionId,
   };
 

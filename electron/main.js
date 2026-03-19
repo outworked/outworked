@@ -7,10 +7,12 @@ const {
   ipcMain,
   dialog,
   Notification,
+  powerSaveBlocker,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const { spawn, execSync } = require("child_process");
+const { spawn, execSync, execFileSync } = require("child_process");
+const crypto = require("crypto");
 
 // Set the app name early so macOS notifications show "Outworked" instead of "Electron"
 app.setName("Outworked");
@@ -217,25 +219,52 @@ let githubToken = "";
 
 // ─── Shell process management ─────────────────────────────────────
 const shells = new Map(); // id → { proc, cwd }
-let shellIdCounter = 0;
 const claudeProcs = new Map(); // reqId → ChildProcess
-let claudeReqId = 0;
+
+// ─── Caffeinate: prevent sleep while tasks are in flight ──────────
+let caffeinateBlockerId = null;
+
+function caffeineStart() {
+  if (caffeinateBlockerId !== null) return; // already blocking
+  caffeinateBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+  console.log(
+    `[caffeinate] started power-save blocker id=${caffeinateBlockerId}`,
+  );
+}
+
+function caffeineStop() {
+  if (caffeinateBlockerId === null) return;
+  if (powerSaveBlocker.isStarted(caffeinateBlockerId)) {
+    powerSaveBlocker.stop(caffeinateBlockerId);
+    console.log(
+      `[caffeinate] stopped power-save blocker id=${caffeinateBlockerId}`,
+    );
+  }
+  caffeinateBlockerId = null;
+}
+
+/** Call after adding/removing from claudeProcs to sync caffeinate state. */
+function syncCaffeinate() {
+  if (claudeProcs.size > 0) caffeineStart();
+  else caffeineStop();
+}
 
 function setupShellIPC() {
   // Spawn a new shell session
   ipcMain.handle("shell:spawn", (_event, cwd) => {
-    const id = ++shellIdCounter;
+    const id = crypto.randomUUID();
+    const safeCwd = validateDir(cwd || process.env.HOME);
     const isWin = process.platform === "win32";
     const proc = isWin
       ? spawn("cmd.exe", [], {
-          cwd: cwd || process.env.HOME,
+          cwd: safeCwd,
           env: augmentedEnv({ TERM: "xterm-256color" }),
         })
       : spawn(SHELL_CMD, ["-l"], {
-          cwd: cwd || process.env.HOME,
+          cwd: safeCwd,
           env: augmentedEnv({ TERM: "xterm-256color" }),
         });
-    shells.set(id, { proc, cwd: cwd || process.env.HOME });
+    shells.set(id, { proc, cwd: safeCwd });
 
     proc.stdout.on("data", (data) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -307,7 +336,13 @@ function setupShellIPC() {
         return;
       }
 
-      const execCwd = cwd || process.env.HOME;
+      let execCwd;
+      try {
+        execCwd = validateDir(cwd || process.env.HOME);
+      } catch (err) {
+        resolve({ ok: false, stdout: "", stderr: "", error: err.message, code: -1 });
+        return;
+      }
 
       // Ensure the working directory exists and is writable before spawning
       try {
@@ -316,28 +351,24 @@ function setupShellIPC() {
         /* best-effort */
       }
 
+      // Only inject GitHub token for git/gh commands, not arbitrary commands
+      const needsToken = githubToken && /^(git|gh)\b/.test(command.trim());
+      const extraEnv = needsToken
+        ? { GH_TOKEN: githubToken, GITHUB_TOKEN: githubToken }
+        : {};
+
       // Use the user's login shell so PATH from .zprofile / .zshenv is available
       const isWin = process.platform === "win32";
       const proc = isWin
         ? spawn(command, {
             cwd: execCwd,
-            env: augmentedEnv({
-              TERM: "dumb",
-              ...(githubToken
-                ? { GH_TOKEN: githubToken, GITHUB_TOKEN: githubToken }
-                : {}),
-            }),
+            env: augmentedEnv({ TERM: "dumb", ...extraEnv }),
             timeout: timeoutMs || 30000,
             shell: true,
           })
         : spawn(SHELL_CMD, ["-l", "-c", command], {
             cwd: execCwd,
-            env: augmentedEnv({
-              TERM: "dumb",
-              ...(githubToken
-                ? { GH_TOKEN: githubToken, GITHUB_TOKEN: githubToken }
-                : {}),
-            }),
+            env: augmentedEnv({ TERM: "dumb", ...extraEnv }),
             timeout: timeoutMs || 30000,
           });
 
@@ -383,7 +414,7 @@ function setupShellIPC() {
   ipcMain.handle(
     "claude-code:start",
     (_event, prompt, systemPrompt, cwd, timeoutMs) => {
-      const reqId = ++claudeReqId;
+      const reqId = crypto.randomUUID();
 
       const execCwd = cwd || process.env.HOME;
       try {
@@ -416,6 +447,7 @@ function setupShellIPC() {
           });
 
       claudeProcs.set(reqId, proc);
+      syncCaffeinate();
 
       let stderrBuf = "";
       console.log(
@@ -446,6 +478,7 @@ function setupShellIPC() {
 
       proc.on("error", (err) => {
         claudeProcs.delete(reqId);
+        syncCaffeinate();
         console.error(
           `[claude-code:start] reqId=${reqId} error: ${err.message}`,
         );
@@ -461,6 +494,7 @@ function setupShellIPC() {
 
       proc.on("close", (code) => {
         claudeProcs.delete(reqId);
+        syncCaffeinate();
         if (code !== 0) {
           console.error(
             `[claude-code:start] reqId=${reqId} exited with code ${code}`,
@@ -489,6 +523,7 @@ function setupShellIPC() {
     if (proc && !proc.killed) {
       proc.kill();
       claudeProcs.delete(reqId);
+      syncCaffeinate();
       return true;
     }
     return false;
@@ -504,7 +539,7 @@ function setupShellIPC() {
   //   resumeSessionId, agents (JSON subagent defs), outputFormat, verbose,
   //   permissionMode, dangerouslySkipPermissions }
   ipcMain.handle("claude-code:startAdvanced", (_event, options) => {
-    const reqId = ++claudeReqId;
+    const reqId = crypto.randomUUID();
     const execCwd = options.cwd || process.env.HOME;
     try {
       ensureDirWritable(execCwd);
@@ -519,13 +554,15 @@ function setupShellIPC() {
     const outputFormat = options.outputFormat || "stream-json";
     args.push("--output-format", outputFormat);
 
-    if (options.verbose !== false) {
+    // --verbose is required when using stream-json with -p mode
+    if (options.verbose === true || outputFormat === "stream-json") {
       args.push("--verbose");
     }
 
-    if (outputFormat === "stream-json") {
-      args.push("--include-partial-messages");
-    }
+    // NOTE: --include-partial-messages was removed for performance.
+    // It causes O(n²) IPC traffic because each partial event contains the
+    // full accumulated text, not just the delta.  The stream-json format
+    // already provides tool_use, result, and other events we need.
 
     // Model selection
     if (options.model) {
@@ -673,6 +710,7 @@ function setupShellIPC() {
     );
 
     claudeProcs.set(reqId, proc);
+    syncCaffeinate();
 
     let stderrBuf = "";
 
@@ -719,6 +757,7 @@ function setupShellIPC() {
 
     proc.on("error", (err) => {
       claudeProcs.delete(reqId);
+      syncCaffeinate();
       cleanupMcpConfig();
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("claude-code:done", reqId, -1, err.message);
@@ -727,6 +766,7 @@ function setupShellIPC() {
 
     proc.on("close", (code) => {
       claudeProcs.delete(reqId);
+      syncCaffeinate();
       cleanupMcpConfig();
       if (code !== 0) {
         console.error(
@@ -984,15 +1024,18 @@ function setupShellIPC() {
   ipcMain.handle("claude-code:writeAgentFile", (_event, filePath, content) => {
     try {
       // Validate: only allow writing to .claude/agents/ directories
-      const normalized = path.normalize(filePath);
-      if (!normalized.includes(path.join(".claude", "agents"))) {
+      // Use path.resolve to canonicalize, then verify the resolved path
+      // is inside a .claude/agents/ directory under the workspace
+      const resolved = path.resolve(filePath);
+      const agentsDir = path.join(workspaceDir, ".claude", "agents");
+      if (!resolved.startsWith(agentsDir + path.sep) && resolved !== agentsDir) {
         return {
           ok: false,
           error: "Can only write to .claude/agents/ directories",
         };
       }
-      ensureDirWritable(path.dirname(normalized));
-      fs.writeFileSync(normalized, content, {
+      ensureDirWritable(path.dirname(resolved));
+      fs.writeFileSync(resolved, content, {
         encoding: "utf-8",
         mode: FILE_MODE,
       });
@@ -1005,15 +1048,16 @@ function setupShellIPC() {
   // Delete a subagent file
   ipcMain.handle("claude-code:deleteAgentFile", (_event, filePath) => {
     try {
-      const normalized = path.normalize(filePath);
-      if (!normalized.includes(path.join(".claude", "agents"))) {
+      const resolved = path.resolve(filePath);
+      const agentsDir = path.join(workspaceDir, ".claude", "agents");
+      if (!resolved.startsWith(agentsDir + path.sep) && resolved !== agentsDir) {
         return {
           ok: false,
           error: "Can only delete from .claude/agents/ directories",
         };
       }
-      if (fs.existsSync(normalized)) {
-        fs.unlinkSync(normalized);
+      if (fs.existsSync(resolved)) {
+        fs.unlinkSync(resolved);
       }
       return { ok: true };
     } catch (err) {
@@ -1116,6 +1160,7 @@ app.on("before-quit", () => {
     if (proc && !proc.killed) proc.kill();
   }
   claudeProcs.clear();
+  caffeineStop();
 });
 
 // ─── Filesystem IPC ───────────────────────────────────────────────
@@ -1128,8 +1173,21 @@ function ensureDir(dirPath) {
 function resolveSafe(relativePath) {
   // Prevent path traversal outside workspace
   const resolved = path.resolve(workspaceDir, relativePath);
-  if (!resolved.startsWith(workspaceDir)) {
+  if (resolved !== workspaceDir && !resolved.startsWith(workspaceDir + path.sep)) {
     throw new Error("Path escapes workspace");
+  }
+  return resolved;
+}
+
+/**
+ * Validate that a directory path is a real directory and not a
+ * system-critical location. Returns the resolved absolute path.
+ */
+function validateDir(dir) {
+  const resolved = path.resolve(dir);
+  const blockedRoots = ["/", "/etc", "/usr", "/bin", "/sbin", "/var", "/System", "/Library"];
+  if (blockedRoots.includes(resolved)) {
+    throw new Error(`Refusing to operate in system directory: ${resolved}`);
   }
   return resolved;
 }
@@ -1139,7 +1197,13 @@ function setupFilesystemIPC() {
   ipcMain.handle("fs:getWorkspace", () => workspaceDir);
 
   ipcMain.handle("fs:setWorkspace", (_event, dir) => {
-    workspaceDir = dir;
+    // Validate: must be an absolute path and not a system-critical directory
+    const resolved = path.resolve(dir);
+    const blockedRoots = ["/", "/etc", "/usr", "/bin", "/sbin", "/var", "/System", "/Library"];
+    if (blockedRoots.includes(resolved)) {
+      throw new Error(`Cannot set workspace to system directory: ${resolved}`);
+    }
+    workspaceDir = resolved;
     ensureDir(workspaceDir);
     // Verify the workspace is fully accessible after switching
     try {
@@ -1344,6 +1408,82 @@ function setupFilesystemIPC() {
     walk(workspaceDir, "", 0);
     return results;
   });
+
+  // Search file contents by keywords — returns matching file paths with snippets
+  ipcMain.handle("fs:searchFiles", (_event, keywords, maxResults = 50) => {
+    ensureDir(workspaceDir);
+    if (!Array.isArray(keywords) || keywords.length === 0) return [];
+
+    // Build a case-insensitive pattern from keywords
+    const patterns = keywords.map((k) => new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "i"));
+    const results = [];
+    const MAX_FILE_SIZE_SEARCH = 256 * 1024; // 256KB max for search
+
+    function walk(dir, prefix, depth) {
+      if (depth > MAX_DEPTH || results.length >= maxResults) return;
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (results.length >= maxResults) return;
+        const rel = prefix ? prefix + "/" + entry.name : entry.name;
+        if (entry.isDirectory()) {
+          if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+          walk(path.join(dir, entry.name), rel, depth + 1);
+        } else {
+          const abs = path.join(dir, entry.name);
+          let stat;
+          try {
+            stat = fs.statSync(abs);
+          } catch {
+            continue;
+          }
+          if (stat.size > MAX_FILE_SIZE_SEARCH) continue;
+
+          // First check filename matches
+          const nameMatches = patterns.some((p) => p.test(entry.name));
+
+          // Then check content if needed
+          let contentMatches = false;
+          let matchSnippet = "";
+          if (!nameMatches) {
+            try {
+              const content = fs.readFileSync(abs, "utf-8");
+              for (const pat of patterns) {
+                const match = content.match(pat);
+                if (match) {
+                  contentMatches = true;
+                  // Extract a snippet around the match
+                  const idx = match.index || 0;
+                  const start = Math.max(0, idx - 40);
+                  const end = Math.min(content.length, idx + match[0].length + 40);
+                  matchSnippet = content.slice(start, end).replace(/\n/g, " ");
+                  break;
+                }
+              }
+            } catch {
+              continue;
+            }
+          }
+
+          if (nameMatches || contentMatches) {
+            results.push({
+              path: rel,
+              size: stat.size,
+              updatedAt: stat.mtimeMs,
+              matchType: nameMatches ? "filename" : "content",
+              snippet: matchSnippet,
+            });
+          }
+        }
+      }
+    }
+    walk(workspaceDir, "", 0);
+    return results;
+  });
 }
 
 // ─── File Watcher IPC ─────────────────────────────────────────────
@@ -1371,6 +1511,9 @@ let activeWatcher = null;
  */
 function shouldSkipWatchPath(relPath) {
   if (!relPath) return false;
+  // Allow the top-level .git directory itself (e.g. from `git init`) so the
+  // tree-changed event fires, but still skip anything inside .git/.
+  if (relPath === ".git") return false;
   const parts = relPath.split(path.sep);
   return parts.some((p) => WATCH_SKIP_DIRS.has(p));
 }
@@ -1482,20 +1625,41 @@ function setupGitIPC() {
   const EXEC_OPTS = { encoding: "utf-8", timeout: 10000 };
 
   /**
-   * Run a git command in `cwd`, returning stdout as a trimmed string.
-   * Throws on non-zero exit (execSync behaviour).
-   * @param {string} cmd
-   * @param {string} cwd
+   * Run a git/gh command in `cwd`, returning stdout as a trimmed string.
+   * Uses execFileSync with argument arrays to prevent command injection.
+   * @param {string[]} args - Array of arguments (first element can be "git" or "gh")
+   * @param {string} cwd - Working directory
    */
-  function git(cmd, cwd) {
-    return execSync(cmd, { ...EXEC_OPTS, cwd }).trimEnd();
+  function git(args, cwd) {
+    const safeCwd = validateDir(cwd);
+    const [binary, ...rest] = args;
+    const env = githubToken
+      ? { ...process.env, GH_TOKEN: githubToken, GITHUB_TOKEN: githubToken }
+      : process.env;
+    return execFileSync(binary, rest, { ...EXEC_OPTS, cwd: safeCwd, env }).trimEnd();
   }
+
+  // Check if a directory is inside a git repository.
+  ipcMain.handle("git:isRepo", (_event, dir) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const safeCwd = validateDir(cwd);
+      execFileSync("git", ["rev-parse", "--git-dir"], {
+        ...EXEC_OPTS,
+        cwd: safeCwd,
+        stdio: "pipe",
+      });
+      return { ok: true, isRepo: true };
+    } catch {
+      return { ok: true, isRepo: false };
+    }
+  });
 
   // Parse `git status --porcelain` output into a structured array.
   ipcMain.handle("git:status", (_event, dir) => {
     const cwd = dir || workspaceDir;
     try {
-      const raw = git("git status --porcelain", cwd);
+      const raw = git(["git", "status", "--porcelain"], cwd);
       const files = raw
         .split("\n")
         .filter(Boolean)
@@ -1513,10 +1677,10 @@ function setupGitIPC() {
   ipcMain.handle("git:diff", (_event, dir, ref, filepath) => {
     const cwd = dir || workspaceDir;
     try {
-      let cmd = "git diff";
-      if (ref) cmd += ` ${ref}`;
-      if (filepath) cmd += ` -- ${filepath}`;
-      const diff = git(cmd, cwd);
+      const args = ["git", "diff"];
+      if (ref) args.push(ref);
+      if (filepath) args.push("--", filepath);
+      const diff = git(args, cwd);
       return { ok: true, diff };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1527,9 +1691,13 @@ function setupGitIPC() {
   ipcMain.handle("git:diffStat", (_event, dir) => {
     const cwd = dir || workspaceDir;
     try {
-      const stat = git("git diff --stat", cwd);
+      const stat = git(["git", "diff", "--stat"], cwd);
       return { ok: true, stat };
     } catch (err) {
+      // No commits yet — diff --stat has nothing to compare against
+      if (/unknown revision|does not have any commits/i.test(err.message)) {
+        return { ok: true, stat: "" };
+      }
       return { ok: false, error: err.message };
     }
   });
@@ -1538,9 +1706,13 @@ function setupGitIPC() {
   ipcMain.handle("git:log", (_event, dir) => {
     const cwd = dir || workspaceDir;
     try {
-      const log = git("git log --oneline -20", cwd);
+      const log = git(["git", "log", "--oneline", "-20"], cwd);
       return { ok: true, log };
     } catch (err) {
+      // Empty repo (no commits yet) — not an error, just no history
+      if (/does not have any commits/i.test(err.message)) {
+        return { ok: true, log: "" };
+      }
       return { ok: false, error: err.message };
     }
   });
@@ -1552,12 +1724,16 @@ function setupGitIPC() {
   ipcMain.handle("git:stashRef", (_event, dir) => {
     const cwd = dir || workspaceDir;
     try {
-      const ref = git("git stash create", cwd);
+      const ref = git(["git", "stash", "create"], cwd);
       if (ref) return { ok: true, ref };
       // No local changes – use HEAD as the baseline.
-      const head = git("git rev-parse HEAD", cwd);
+      const head = git(["git", "rev-parse", "HEAD"], cwd);
       return { ok: true, ref: head };
     } catch (err) {
+      // No commits yet — no baseline available
+      if (/unknown revision|does not have any commits/i.test(err.message)) {
+        return { ok: true, ref: "" };
+      }
       return { ok: false, error: err.message };
     }
   });
@@ -1566,8 +1742,23 @@ function setupGitIPC() {
   ipcMain.handle("git:branchInfo", (_event, dir) => {
     const cwd = dir || workspaceDir;
     try {
-      const current = git("git rev-parse --abbrev-ref HEAD", cwd);
-      const raw = git("git branch --format='%(refname:short)'", cwd);
+      let current = "";
+      try {
+        current = git(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd);
+      } catch (e) {
+        // No commits yet — HEAD doesn't resolve. Read branch name from symbolic ref.
+        if (/unknown revision|does not have any commits/i.test(e.message)) {
+          try {
+            const symRef = git(["git", "symbolic-ref", "--short", "HEAD"], cwd);
+            current = symRef || "main";
+          } catch {
+            current = "main";
+          }
+          return { ok: true, current, branches: [current], remote: "", ahead: 0, behind: 0 };
+        }
+        throw e;
+      }
+      const raw = git(["git", "branch", "--format=%(refname:short)"], cwd);
       const branches = raw.split("\n").filter(Boolean);
       // Try to get remote tracking info
       let remote = "";
@@ -1575,11 +1766,11 @@ function setupGitIPC() {
       let behind = 0;
       try {
         remote = git(
-          "git rev-parse --abbrev-ref --symbolic-full-name @{u}",
+          ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
           cwd,
         );
         const counts = git(
-          "git rev-list --left-right --count HEAD...@{u}",
+          ["git", "rev-list", "--left-right", "--count", "HEAD...@{u}"],
           cwd,
         );
         const [a, b] = counts.split(/\s+/);
@@ -1599,11 +1790,9 @@ function setupGitIPC() {
     const cwd = dir || workspaceDir;
     try {
       if (!files || files.length === 0) {
-        git("git add -A", cwd);
+        git(["git", "add", "-A"], cwd);
       } else {
-        for (const f of files) {
-          git(`git add -- "${f}"`, cwd);
-        }
+        git(["git", "add", "--", ...files], cwd);
       }
       return { ok: true };
     } catch (err) {
@@ -1616,14 +1805,25 @@ function setupGitIPC() {
     const cwd = dir || workspaceDir;
     try {
       if (!files || files.length === 0) {
-        git("git reset HEAD", cwd);
+        git(["git", "reset", "HEAD"], cwd);
       } else {
-        for (const f of files) {
-          git(`git reset HEAD -- "${f}"`, cwd);
-        }
+        git(["git", "reset", "HEAD", "--", ...files], cwd);
       }
       return { ok: true };
     } catch (err) {
+      // No commits yet — use "git rm --cached" to unstage in an empty repo
+      if (/unknown revision|does not have any commits/i.test(err.message)) {
+        try {
+          if (!files || files.length === 0) {
+            git(["git", "rm", "--cached", "-r", "."], cwd);
+          } else {
+            git(["git", "rm", "--cached", "--", ...files], cwd);
+          }
+          return { ok: true };
+        } catch (e2) {
+          return { ok: false, error: e2.message };
+        }
+      }
       return { ok: false, error: err.message };
     }
   });
@@ -1632,9 +1832,9 @@ function setupGitIPC() {
   ipcMain.handle("git:diffStaged", (_event, dir, filepath) => {
     const cwd = dir || workspaceDir;
     try {
-      let cmd = "git diff --cached";
-      if (filepath) cmd += ` -- "${filepath}"`;
-      const diff = git(cmd, cwd);
+      const args = ["git", "diff", "--cached"];
+      if (filepath) args.push("--", filepath);
+      const diff = git(args, cwd);
       return { ok: true, diff };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1648,9 +1848,8 @@ function setupGitIPC() {
       if (!message || !message.trim()) {
         return { ok: false, error: "Commit message is required" };
       }
-      // Use -m with the message; escape double quotes in the message
-      const escaped = message.replace(/"/g, '\\"');
-      const output = git(`git commit -m "${escaped}"`, cwd);
+      // Pass message as a separate argument — no shell escaping needed
+      const output = git(["git", "commit", "-m", message], cwd);
       return { ok: true, output };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1665,7 +1864,7 @@ function setupGitIPC() {
         return { ok: false, error: "Branch name is required" };
       }
       const safe = branchName.trim().replace(/[^a-zA-Z0-9._\-\/]/g, "-");
-      git(`git checkout -b "${safe}"`, cwd);
+      git(["git", "checkout", "-b", safe], cwd);
       return { ok: true, branch: safe };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1676,7 +1875,13 @@ function setupGitIPC() {
   ipcMain.handle("git:checkoutBranch", (_event, dir, branchName) => {
     const cwd = dir || workspaceDir;
     try {
-      git(`git checkout "${branchName}"`, cwd);
+      if (!branchName || typeof branchName !== "string") {
+        return { ok: false, error: "Branch name is required" };
+      }
+      // Sanitize: only allow valid git branch name characters
+      const safe = branchName.trim().replace(/[^a-zA-Z0-9._\-\/]/g, "");
+      if (!safe) return { ok: false, error: "Invalid branch name" };
+      git(["git", "checkout", safe], cwd);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1687,10 +1892,10 @@ function setupGitIPC() {
   ipcMain.handle("git:push", (_event, dir, setUpstream) => {
     const cwd = dir || workspaceDir;
     try {
-      const branch = git("git rev-parse --abbrev-ref HEAD", cwd);
-      let cmd = "git push";
-      if (setUpstream) cmd += ` -u origin "${branch}"`;
-      const output = git(cmd, cwd);
+      const branch = git(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd);
+      const args = ["git", "push"];
+      if (setUpstream) args.push("-u", "origin", branch);
+      const output = git(args, cwd);
       return { ok: true, output };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1701,11 +1906,10 @@ function setupGitIPC() {
   ipcMain.handle("git:createPr", (_event, dir, title, body, baseBranch) => {
     const cwd = dir || workspaceDir;
     try {
-      const escaped_title = title.replace(/"/g, '\\"');
-      const escaped_body = (body || "").replace(/"/g, '\\"');
-      let cmd = `gh pr create --title "${escaped_title}" --body "${escaped_body}"`;
-      if (baseBranch) cmd += ` --base "${baseBranch}"`;
-      const output = git(cmd, cwd);
+      // Pass title/body as separate arguments — no shell escaping needed
+      const args = ["gh", "pr", "create", "--title", title, "--body", body || ""];
+      if (baseBranch) args.push("--base", baseBranch);
+      const output = git(args, cwd);
       return { ok: true, output, url: output.trim() };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1716,7 +1920,7 @@ function setupGitIPC() {
   ipcMain.handle("git:statusDetailed", (_event, dir) => {
     const cwd = dir || workspaceDir;
     try {
-      const raw = git("git status --porcelain", cwd);
+      const raw = git(["git", "status", "--porcelain"], cwd);
       const staged = [];
       const unstaged = [];
       const untracked = [];
@@ -1971,13 +2175,26 @@ function setupMusicIPC() {
 const os = require("os");
 const SESSIONS_DIR = path.join(os.homedir(), ".outworked", "sessions");
 
+/**
+ * Sanitize a session/agent ID to prevent path traversal.
+ * Only allows alphanumeric, hyphens, underscores, and dots.
+ */
+function sanitizeId(id) {
+  if (!id || typeof id !== "string") throw new Error("Invalid ID");
+  const safe = id.replace(/[^a-zA-Z0-9._-]/g, "");
+  if (!safe || safe === "." || safe === "..") throw new Error("Invalid ID");
+  return safe;
+}
+
 function setupSessionIPC() {
   // Save a full session to disk
   ipcMain.handle("session:save", (_event, session) => {
     try {
-      const dir = path.join(SESSIONS_DIR, session.agentId);
+      const safeAgentId = sanitizeId(session.agentId);
+      const safeSessionId = sanitizeId(session.id);
+      const dir = path.join(SESSIONS_DIR, safeAgentId);
       fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-      const filePath = path.join(dir, `${session.id}.json`);
+      const filePath = path.join(dir, `${safeSessionId}.json`);
       fs.writeFileSync(filePath, JSON.stringify(session, null, 2), {
         encoding: "utf8",
         mode: FILE_MODE,
@@ -1992,7 +2209,7 @@ function setupSessionIPC() {
   // Load a single session
   ipcMain.handle("session:load", (_event, agentId, sessionId) => {
     try {
-      const filePath = path.join(SESSIONS_DIR, agentId, `${sessionId}.json`);
+      const filePath = path.join(SESSIONS_DIR, sanitizeId(agentId), `${sanitizeId(sessionId)}.json`);
       if (!fs.existsSync(filePath)) return { ok: false, error: "not found" };
       const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
       return { ok: true, session: data };
@@ -2005,7 +2222,7 @@ function setupSessionIPC() {
   // List all sessions for an agent (metadata only, sorted by updatedAt desc)
   ipcMain.handle("session:list", (_event, agentId) => {
     try {
-      const dir = path.join(SESSIONS_DIR, agentId);
+      const dir = path.join(SESSIONS_DIR, sanitizeId(agentId));
       if (!fs.existsSync(dir)) return [];
       const files = fs
         .readdirSync(dir)
@@ -2044,7 +2261,7 @@ function setupSessionIPC() {
   // Delete a session
   ipcMain.handle("session:delete", (_event, agentId, sessionId) => {
     try {
-      const filePath = path.join(SESSIONS_DIR, agentId, `${sessionId}.json`);
+      const filePath = path.join(SESSIONS_DIR, sanitizeId(agentId), `${sanitizeId(sessionId)}.json`);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
       return { ok: true };
     } catch (err) {
@@ -2056,7 +2273,7 @@ function setupSessionIPC() {
   // Search sessions by title or message content
   ipcMain.handle("session:search", (_event, agentId, query) => {
     try {
-      const dir = path.join(SESSIONS_DIR, agentId);
+      const dir = path.join(SESSIONS_DIR, sanitizeId(agentId));
       if (!fs.existsSync(dir)) return [];
       const q = query.toLowerCase();
       const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
@@ -2105,7 +2322,7 @@ function createWindow() {
         ...details.responseHeaders,
         "Content-Security-Policy": [
           "default-src 'self' file:; " +
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; " +
+            "script-src 'self' blob:; " +
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
             "font-src 'self' https://fonts.gstatic.com; " +
             "connect-src 'self' https://api.openai.com https://api.anthropic.com; " +
@@ -2130,7 +2347,8 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
+      additionalArguments: [`--homedir=${require("os").homedir()}`],
     },
   });
 

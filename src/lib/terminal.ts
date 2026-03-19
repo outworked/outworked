@@ -146,6 +146,7 @@ interface ElectronAPI {
     onFileTreeChanged: (cb: () => void) => () => void;
   };
   git?: {
+    isRepo: (cwd?: string) => Promise<{ ok: boolean; isRepo: boolean }>;
     status: (cwd?: string) => Promise<GitStatusResult>;
     statusDetailed: (cwd?: string) => Promise<GitStatusDetailedResult>;
     diff: (cwd?: string, ref?: string, filepath?: string) => Promise<GitDiffResult>;
@@ -366,21 +367,32 @@ export async function runClaudeCodeAdvanced(
             const event: ClaudeCodeEvent = JSON.parse(trimmed);
             callbacks.onEvent?.(event);
 
-            // Extract text deltas
+            // Extract text from assistant messages.
+            // Assistant events contain the FULL content so far (not a delta),
+            // so we replace fullText rather than appending to avoid duplication.
             if (event.type === 'assistant' && event.message?.content) {
               const content = event.message.content;
+              let newText = '';
               if (typeof content === 'string') {
-                fullText += content;
-                callbacks.onTextDelta?.(content);
+                newText = content;
               } else if (Array.isArray(content)) {
                 for (const block of content) {
                   if (block.type === 'text' && block.text) {
-                    fullText += block.text;
-                    callbacks.onTextDelta?.(block.text);
+                    newText += block.text;
                   } else if (block.type === 'tool_use' && block.name) {
                     callbacks.onToolUse?.(block.name, (block.input as Record<string, unknown>) || {});
                   }
                 }
+              }
+              // Only emit a delta for the new portion of text
+              if (newText.length > fullText.length) {
+                const delta = newText.slice(fullText.length);
+                fullText = newText;
+                callbacks.onTextDelta?.(delta);
+              } else if (newText && newText !== fullText) {
+                // Content was replaced (e.g. new turn) — emit the full new text
+                fullText = newText;
+                callbacks.onTextDelta?.(newText);
               }
             }
 
@@ -608,6 +620,13 @@ export interface GitDiffResult {
   ok: boolean;
   diff?: string;
   error?: string;
+}
+
+export async function gitIsRepo(cwd?: string): Promise<boolean> {
+  const api = getAPI();
+  if (!api?.git?.isRepo) return false;
+  const res = await api.git.isRepo(cwd);
+  return res?.isRepo === true;
 }
 
 export async function gitStatus(cwd?: string): Promise<GitStatusResult> {

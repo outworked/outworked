@@ -15,6 +15,14 @@ export interface FileMeta {
 
 // ─── Electron bridge types ────────────────────────────────────────
 
+export interface SearchResult {
+  path: string;
+  size: number;
+  updatedAt: number;
+  matchType: 'filename' | 'content';
+  snippet: string;
+}
+
 interface ElectronFsAPI {
   getWorkspace: () => Promise<string>;
   setWorkspace: (dir: string) => Promise<string>;
@@ -25,6 +33,7 @@ interface ElectronFsAPI {
   listFiles: (dir?: string) => Promise<{ path: string; size: number; updatedAt: number }[]>;
   listAllFiles: () => Promise<FileMeta[]>;
   getAllFiles: () => Promise<FileEntry[]>;
+  searchFiles: (keywords: string[], maxResults?: number) => Promise<SearchResult[]>;
 }
 
 interface PermissionsAPI {
@@ -125,6 +134,36 @@ export async function listAllFiles(): Promise<FileMeta[]> {
   }
   // Browser fallback: derive metadata from stored entries
   return fallbackGetAll().map(f => ({ path: f.path, size: f.content.length, updatedAt: f.updatedAt }));
+}
+
+export async function searchFiles(keywords: string[], maxResults = 50): Promise<SearchResult[]> {
+  const api = getElectronFs();
+  if (api) {
+    return api.searchFiles(keywords, maxResults);
+  }
+  // Browser fallback: search in-memory files
+  const files = fallbackGetAll();
+  const patterns = keywords.map(k => new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+  const results: SearchResult[] = [];
+  for (const f of files) {
+    if (results.length >= maxResults) break;
+    const nameMatch = patterns.some(p => p.test(f.path.split('/').pop() || ''));
+    if (nameMatch) {
+      results.push({ path: f.path, size: f.content.length, updatedAt: f.updatedAt, matchType: 'filename', snippet: '' });
+      continue;
+    }
+    for (const pat of patterns) {
+      const match = f.content.match(pat);
+      if (match) {
+        const idx = match.index || 0;
+        const start = Math.max(0, idx - 40);
+        const end = Math.min(f.content.length, idx + match[0].length + 40);
+        results.push({ path: f.path, size: f.content.length, updatedAt: f.updatedAt, matchType: 'content', snippet: f.content.slice(start, end) });
+        break;
+      }
+    }
+  }
+  return results;
 }
 
 // ─── Browser fallback (localStorage) ──────────────────────────────

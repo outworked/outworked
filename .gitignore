@@ -38,5 +38,6 @@ yarn-error.log*
 next-env.d.ts
 
 outworked.md
+newFeatures.md
 
 .claude

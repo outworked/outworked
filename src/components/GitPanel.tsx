@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
+  gitIsRepo,
   gitStatusDetailed,
   gitBranchInfo,
   gitDiff,
@@ -77,6 +78,7 @@ export default function GitPanel({ workspaceDir }: GitPanelProps) {
   const [prBase, setPrBase] = useState('main');
   const [busy, setBusy] = useState('');
   const [toast, setToast] = useState<{ msg: string; type: 'ok' | 'err' } | null>(null);
+  const [isRepo, setIsRepo] = useState<boolean | null>(null); // null = checking
   const mountedRef = useRef(true);
   const commitInputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -108,17 +110,38 @@ export default function GitPanel({ workspaceDir }: GitPanelProps) {
     if (mountedRef.current && res.ok) setLogContent(res.log || '');
   }, [workspaceDir]);
 
+  // Check if workspace is a git repo before doing anything
   useEffect(() => {
     mountedRef.current = true;
-    refreshStatus();
-    refreshLog();
-    return () => { mountedRef.current = false; };
-  }, [workspaceDir, refreshStatus, refreshLog]);
+    let cancelled = false;
+    (async () => {
+      if (!workspaceDir) { setIsRepo(false); return; }
+      const repo = await gitIsRepo(workspaceDir);
+      if (!cancelled) setIsRepo(repo);
+    })();
+    return () => { cancelled = true; mountedRef.current = false; };
+  }, [workspaceDir]);
 
   useEffect(() => {
-    if (!isElectron()) return;
-    return onFileTreeChanged(() => { refreshStatus(); refreshLog(); });
-  }, [refreshStatus, refreshLog]);
+    if (!isRepo) return;
+    refreshStatus();
+    refreshLog();
+  }, [isRepo, refreshStatus, refreshLog]);
+
+  // Re-check isRepo when files change (catches `git init` from terminal)
+  useEffect(() => {
+    if (!isElectron() || !workspaceDir) return;
+    if (isRepo) {
+      // Already a repo — just refresh status on file changes
+      return onFileTreeChanged(() => { refreshStatus(); refreshLog(); });
+    }
+    // Not a repo yet — watch for .git directory creation (git init)
+    return onFileTreeChanged(() => {
+      gitIsRepo(workspaceDir).then(repo => {
+        if (repo) setIsRepo(true);
+      });
+    });
+  }, [workspaceDir, isRepo, refreshStatus, refreshLog]);
 
   // ─── Actions ────────────────────────────────────────────────────
   const handleStageFile = useCallback(async (filepath: string) => {
@@ -239,6 +262,26 @@ export default function GitPanel({ workspaceDir }: GitPanelProps) {
   }, [workspaceDir]);
 
   const totalChanges = staged.length + unstaged.length + untracked.length;
+
+  // Not a git repo – show a message instead of the full panel
+  if (isRepo === false) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full bg-slate-950 text-gray-400 gap-2 p-6 text-center">
+        <span className="text-lg">No Git Repository</span>
+        <span className="text-xs text-gray-500">
+          This workspace is not inside a git repository. Run <code className="text-gray-400 bg-slate-800 px-1 rounded">git init</code> to get started.
+        </span>
+      </div>
+    );
+  }
+
+  if (isRepo === null) {
+    return (
+      <div className="flex items-center justify-center h-full bg-slate-950 text-gray-500 text-xs">
+        Checking git status…
+      </div>
+    );
+  }
 
   // Sync indicator string
   const syncInfo = branchInfo.remote

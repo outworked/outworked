@@ -1,6 +1,6 @@
 import { Agent, AgentSkill, AgentTodo, ApiKeys, Message, SubagentDef } from './types';
 import { sendMessage } from './ai';
-import { listFiles, listAllFiles, readFile, writeFile } from './filesystem';
+import { listFiles, listAllFiles, readFile, writeFile, searchFiles } from './filesystem';
 import { runClaudeCodeAdvanced, ClaudeCodeAdvancedOptions, ClaudeCodeStreamCallbacks } from './terminal';
 import { getWorkspace } from './filesystem';
 
@@ -34,7 +34,11 @@ You will be given a list of current employees with their names, roles, and what 
 
 IMPORTANT: If the task requires expertise that NO current employee has, you MUST create new employees with the right skills. For example, if the task needs a backend engineer but only a designer exists, create one.
 
-You will also be given a list of existing project directories in the workspace AND the contents of key files. Use the file contents to understand what already exists — this is critical for making informed routing decisions. For example, if the project already has a package.json, you know the tech stack; if it has certain source files, you can assign tasks that build on them rather than starting from scratch.
+You will also be given:
+- A list of existing project directories in the workspace
+- A file tree showing ALL files in the workspace (paths + sizes only)
+- The contents of relevant files (config files + files matching the instruction's keywords)
+Use the file tree for orientation and the file contents to understand what already exists — this is critical for making informed routing decisions. For example, if the project already has a package.json, you know the tech stack; if it has certain source files, you can assign tasks that build on them rather than starting from scratch.
 
 
 RESPOND in this exact JSON format and nothing else:
@@ -60,6 +64,32 @@ Rules:
 - All employees share the same project working directory — coordinate their work so they don't overwrite each other
 - The workingDirectory should be reused if an existing directory is relevant, or a new short slug if not`;
 
+/**
+ * Extract and parse a JSON object from an LLM reply that may contain
+ * markdown fences, preamble text, or trailing commas.
+ */
+function extractJson(reply: string): Record<string, unknown> {
+  let jsonStr = reply;
+
+  // Try markdown code block first
+  const codeBlockMatch = reply.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    jsonStr = codeBlockMatch[1].trim();
+  } else {
+    // Find the outermost { … }
+    const firstBrace = reply.indexOf('{');
+    const lastBrace = reply.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      jsonStr = reply.slice(firstBrace, lastBrace + 1);
+    }
+  }
+
+  // Strip trailing commas before } or ] (common LLM mistake)
+  jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
+
+  return JSON.parse(jsonStr);
+}
+
 export async function routeTasks(
   instruction: string,
   agents: Agent[],
@@ -81,19 +111,65 @@ export async function routeTasks(
     ? `## Existing project directories\n${dirList.map((d) => `- ${d}`).join('\n')}`
     : '## Existing project directories\n(none)';
 
-  // Read all files in the workspace so the router can understand existing code
-  const MAX_FILE_SIZE = 12_000; // skip very large files to stay within context
-  const MAX_TOTAL_CHARS = 80_000; // cap total included content
+  // ─── Selective file reading ──────────────────────────────────────
+  // Instead of reading the entire codebase, we:
+  // 1. Always include the file tree (metadata only) for orientation
+  // 2. Always read key config files (package.json, tsconfig, etc.)
+  // 3. Search for files relevant to the instruction by keyword
+  // 4. Only read matched files, within a budget
+  const MAX_FILE_SIZE = 12_000;
+  const MAX_TOTAL_CHARS = 60_000;
   const allFiles = await listAllFiles();
+
+  // Build compact file tree (paths + sizes) — cheap context for the router
+  const fileTree = allFiles
+    .map((f) => `  ${f.path} (${f.size}b)`)
+    .join('\n');
+  const treeSection = allFiles.length > 0
+    ? `## File tree (${allFiles.length} files)\n${fileTree}`
+    : '## File tree\n(empty workspace)';
+
+  // Key config files the router should always see
+  const CONFIG_PATTERNS = [
+    'package.json', 'tsconfig.json', 'pyproject.toml', 'Cargo.toml',
+    'go.mod', 'Gemfile', 'requirements.txt', 'Makefile', 'Dockerfile',
+    'docker-compose.yml', 'docker-compose.yaml', '.env.example',
+    'README.md', 'readme.md',
+  ];
+  const configPaths = new Set(
+    allFiles
+      .filter((f) => CONFIG_PATTERNS.some((p) => f.path === p || f.path.endsWith('/' + p)))
+      .map((f) => f.path)
+  );
+
+  // Extract keywords from the instruction for targeted search
+  const keywords = extractKeywords(instruction);
+
+  // Search for files matching those keywords
+  const searchResults = keywords.length > 0
+    ? await searchFiles(keywords, 30)
+    : [];
+
+  // Merge config files + search results, deduplicated
+  const filesToRead = new Set<string>([...configPaths]);
+  for (const r of searchResults) {
+    filesToRead.add(r.path);
+  }
+
+  // Read selected files within budget
   let totalChars = 0;
   const fileContents: string[] = [];
-  for (const meta of allFiles) {
+  const allFileMap = new Map(allFiles.map((f) => [f.path, f]));
+
+  for (const filePath of filesToRead) {
+    const meta = allFileMap.get(filePath);
+    if (!meta) continue;
     if (meta.size > MAX_FILE_SIZE) {
       fileContents.push(`### ${meta.path}\n(skipped — ${meta.size} bytes, too large)`);
       continue;
     }
     if (totalChars + meta.size > MAX_TOTAL_CHARS) {
-      fileContents.push(`### ${meta.path}\n(skipped — total context limit reached)`);
+      fileContents.push(`### ${meta.path}\n(skipped — context budget reached)`);
       continue;
     }
     const content = await readFile(meta.path);
@@ -104,11 +180,12 @@ export async function routeTasks(
     fileContents.push(`### ${meta.path}\n\`\`\`\n${content}\n\`\`\``);
     totalChars += content.length;
   }
-  const filesSection = fileContents.length > 0
-    ? `## Workspace files\n${fileContents.join('\n\n')}`
-    : '## Workspace files\n(empty workspace)';
 
-  const prompt = `## Employees\n${employeeList}\n\n${dirsSection}\n\n${filesSection}\n\n## Instruction\n${instruction}`;
+  const filesSection = fileContents.length > 0
+    ? `## Relevant files (${fileContents.length} of ${allFiles.length} total)\n${fileContents.join('\n\n')}`
+    : '## Workspace files\n(no relevant files found)';
+
+  const prompt = `## Employees\n${employeeList}\n\n${dirsSection}\n\n${treeSection}\n\n${filesSection}\n\n## Instruction\n${instruction}`;
 
   // Create a temporary "router" agent
   const routerAgent: Agent = {
@@ -128,60 +205,130 @@ export async function routeTasks(
     todos: [],
   };
 
-  const reply = await sendMessage(
-    routerAgent,
-    prompt,
-    keys,
-    () => {},
-    undefined,
-    { useTools: false },
-  );
+  const MAX_ROUTE_ATTEMPTS = 2;
+  let lastErr: unknown;
+  let lastRawReply = '';
 
-  try {
-    // Extract JSON from reply (handle markdown code blocks)
-    const jsonStr = reply.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(jsonStr);
-
-    // Parse new agent specs
-    const newAgents: NewAgentSpec[] = (parsed.newAgents || []).map(
-      (a: { name: string; role: string; personality: string }) => ({
-        name: a.name,
-        role: a.role,
-        personality: a.personality,
-      })
+  for (let attempt = 0; attempt < MAX_ROUTE_ATTEMPTS; attempt++) {
+    const reply = await sendMessage(
+      routerAgent,
+      attempt === 0
+        ? prompt
+        : `${prompt}\n\nIMPORTANT: Respond ONLY with a valid JSON object. No markdown, no explanation — just the raw JSON.`,
+      keys,
+      () => {},
+      undefined,
+      { useTools: false },
     );
+    lastRawReply = reply;
 
-    const assignments: TaskAssignment[] = (parsed.assignments || []).map(
-      (a: { agentName: string; task: string }) => {
-        const agent = agents.find(
-          (ag) => ag.name.toLowerCase() === a.agentName.toLowerCase()
-        );
-        return {
-          agentId: agent?.id ?? '', // empty string means it's a new agent — resolved after creation
-          agentName: a.agentName,
-          task: a.task,
-        };
-      }
-    );
+    try {
+      const parsed = extractJson(reply);
 
-    // Ensure the working directory exists
-    const workDir = sanitizeSlug(parsed.workingDirectory || 'project');
-    await ensureWorkingDirectory(workDir);
+      // Parse new agent specs
+      const newAgents: NewAgentSpec[] = (parsed.newAgents || []).map(
+        (a: { name: string; role: string; personality: string }) => ({
+          name: a.name,
+          role: a.role,
+          personality: a.personality,
+        })
+      );
 
-    return { assignments, plan: parsed.plan || '', newAgents, workingDirectory: workDir };
-  } catch {
-    // Fallback: assign the whole thing to the first agent
-    const fallbackDir = 'project';
-    await ensureWorkingDirectory(fallbackDir);
-    return {
-      plan: 'Could not parse routing — assigning to first available employee.',
-      assignments: agents.length > 0
-        ? [{ agentId: agents[0].id, agentName: agents[0].name, task: instruction }]
-        : [],
-      newAgents: [],
-      workingDirectory: fallbackDir,
-    };
+      const assignments: TaskAssignment[] = (parsed.assignments || []).map(
+        (a: { agentName: string; task: string }) => {
+          const agent = agents.find(
+            (ag) => ag.name.toLowerCase() === a.agentName.toLowerCase()
+          );
+          return {
+            agentId: agent?.id ?? '', // empty string means it's a new agent — resolved after creation
+            agentName: a.agentName,
+            task: a.task,
+          };
+        }
+      );
+
+      // Ensure the working directory exists
+      const workDir = sanitizeSlug(parsed.workingDirectory || 'project');
+      await ensureWorkingDirectory(workDir);
+
+      return { assignments, plan: parsed.plan || '', newAgents, workingDirectory: workDir };
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[orchestrator] Route attempt ${attempt + 1} failed:`, err, '\nRaw reply:', reply.slice(0, 500));
+      // Loop will retry
+    }
   }
+
+  // All attempts failed — fallback: assign the whole thing to the first agent
+  console.warn('[orchestrator] All route attempts failed. Using fallback.');
+  const fallbackDir = 'project';
+  await ensureWorkingDirectory(fallbackDir);
+  return {
+    plan: 'Could not parse routing — assigning to first available employee.',
+    assignments: agents.length > 0
+      ? [{ agentId: agents[0].id, agentName: agents[0].name, task: instruction }]
+      : [],
+    newAgents: [],
+    workingDirectory: fallbackDir,
+  };
+}
+
+/**
+ * Extract meaningful keywords from an instruction for targeted file search.
+ * Filters out common stop words and short words, returns unique terms.
+ */
+function extractKeywords(instruction: string): string[] {
+  const STOP_WORDS = new Set([
+    'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
+    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
+    'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+    'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when',
+    'where', 'why', 'how', 'all', 'each', 'every', 'both', 'few', 'more',
+    'most', 'other', 'some', 'such', 'no', 'not', 'only', 'same', 'so',
+    'than', 'too', 'very', 'just', 'because', 'but', 'and', 'or', 'if',
+    'while', 'about', 'up', 'this', 'that', 'these', 'those', 'it', 'its',
+    'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'they',
+    'them', 'what', 'which', 'who', 'whom', 'make', 'create', 'build',
+    'add', 'update', 'change', 'fix', 'implement', 'write', 'use', 'get',
+    'set', 'new', 'also', 'like', 'need', 'want', 'please', 'help',
+  ]);
+
+  // Extract words, camelCase splits, and quoted/path-like terms
+  const words = instruction
+    .replace(/[^a-zA-Z0-9_./\-]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const keywords: string[] = [];
+  const seen = new Set<string>();
+
+  for (const word of words) {
+    // Split camelCase: "userProfile" → ["user", "profile"]
+    const parts = word
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .toLowerCase()
+      .split(/\s+/);
+
+    for (const part of parts) {
+      if (part.length < 3) continue;
+      if (STOP_WORDS.has(part)) continue;
+      if (seen.has(part)) continue;
+      seen.add(part);
+      keywords.push(part);
+    }
+
+    // Also keep the original word if it looks like a path or compound term
+    const lower = word.toLowerCase();
+    if ((word.includes('/') || word.includes('.') || word.includes('-') || word.includes('_')) && !seen.has(lower)) {
+      seen.add(lower);
+      keywords.push(lower);
+    }
+  }
+
+  // Limit to top 10 keywords to keep search focused
+  return keywords.slice(0, 10);
 }
 
 /**
@@ -364,36 +511,24 @@ export async function routeTasksViaClaudeCode(
 
   const hasTeam = agentNames.length > 0;
 
-  const systemPrompt = `You are the Boss, the office manager and team lead. Your ONLY job is to delegate tasks to your employees using the Agent tool. You NEVER do implementation work yourself.
+  const systemPrompt = `You are the Boss. Delegate ALL tasks to employees via the Agent tool. NEVER do implementation yourself.
 
-## Your Team
+## Team
 ${agentRoster || '(No employees yet)'}
 
-## How to Delegate
-Use the Agent tool to assign work. For each delegation, specify:
-- The agent name (one of: ${agentNames.length > 0 ? agentNames.map(n => `"${n}"`).join(', ') : 'none available'})
-- A clear, detailed prompt describing exactly what they should do
-
-Example: To assign work to an employee named "Alex", use the Agent tool with agent="Alex" and a detailed prompt.
-
-## CRITICAL Rules
-${hasTeam ? `- You MUST delegate ALL work to your team. NEVER write code, edit files, run commands, or do implementation yourself.
-- Even for small tasks, delegate to the most appropriate team member.
-- For complex tasks, break them into subtasks and delegate each to the right employee.
-- You may delegate to multiple agents in parallel for independent subtasks.
-- After ALL delegations complete, provide a brief summary of what was accomplished.
-- If no employee fits the task perfectly, pick the closest match — they are capable of learning.
-- Your response should ALWAYS include at least one Agent tool call.` : `- You have no employees yet. Tell the user to hire employees first, then come back with their request.`}`;
+## Rules
+${hasTeam ? `- Delegate ALL work. NEVER write code, edit files, or run commands yourself.
+- Break complex tasks into subtasks and delegate to the right employee.
+- Delegate to multiple agents in parallel when subtasks are independent.
+- After delegations complete, provide a brief summary.` : `- No employees yet. Tell the user to hire employees first.`}`;
 
   const options: ClaudeCodeAdvancedOptions = {
     prompt: instruction,
     cwd: workspace,
-    // Use systemPrompt for new sessions, appendSystemPrompt when resuming
-    ...(sessionId
-      ? { appendSystemPrompt: systemPrompt }
-      : { systemPrompt }),
+    // Only send systemPrompt on new sessions — Claude Code already has it
+    // when resuming. Re-sending via appendSystemPrompt wastes input tokens.
+    ...(sessionId ? {} : { systemPrompt }),
     outputFormat: 'stream-json',
-    verbose: true,
     agents: Object.keys(agentDefs).length > 0 ? agentDefs : undefined,
     enableAgentTeams: !!enableAgentTeams,
     // 'acceptEdits' auto-approves file-write operations without prompting.

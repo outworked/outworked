@@ -14,6 +14,20 @@ const CLAUDE_TOOLS = [
   'WebFetch', 'WebSearch', 'LSP', 'Skill', 'TodoWrite', 'Agent',
 ];
 
+const RECOMMENDED_PERMISSIONS = {
+  allow: [
+    'Read', 'Edit', 'Write', 'Glob', 'Grep',
+    'Bash(git *)', 'Bash(npm test *)', 'Bash(npm run *)',
+    'Bash(npx *)', 'Bash(node *)', 'Bash(ls *)',
+    'Bash(cat *)', 'Bash(mkdir *)', 'Bash(cp *)', 'Bash(mv *)',
+    'WebFetch', 'WebSearch',
+  ],
+  deny: [
+    'Bash(rm -rf /)', 'Bash(git push --force *)',
+    'Bash(curl * | bash)', 'Bash(wget * | bash)',
+  ],
+};
+
 // ─── Permission Rules Editor ──────────────────────────────────────
 
 function RulesEditor({
@@ -249,6 +263,32 @@ export default function PermissionsPanel({ workspace, onSaved }: { workspace: st
               : <><code className="text-slate-500">~/.claude/settings.json</code></>}
             {settingsExists ? '' : ' — will be created'}
           </p>
+
+          {/* Quick-apply recommended permissions */}
+          {(perms.allow?.length === 0 && perms.deny?.length === 0) && (
+            <button
+              onClick={async () => {
+                const updated = {
+                  ...claudeSettings,
+                  permissions: {
+                    allow: [...RECOMMENDED_PERMISSIONS.allow],
+                    deny: [...RECOMMENDED_PERMISSIONS.deny],
+                  },
+                };
+                setClaudeSettings(updated);
+                setSaving(true);
+                const ok = await writeClaudeSettings(scope, updated);
+                setSaveMsg(ok ? 'Saved ✓' : 'Error saving');
+                if (ok) onSaved?.();
+                setSaving(false);
+                setTimeout(() => setSaveMsg(''), 2000);
+              }}
+              disabled={saving}
+              className="w-full mb-3 btn-pixel text-[10px] bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded disabled:opacity-50"
+            >
+              {saving ? 'Applying…' : 'Apply Recommended Permissions'}
+            </button>
+          )}
 
           <div className="space-y-3">
             <RulesEditor

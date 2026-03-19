@@ -1,11 +1,14 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const os = require("os");
+
+// Extract homedir from additionalArguments (sandbox prevents os module access)
+const homedirArg = process.argv.find((a) => a.startsWith("--homedir="));
+const homedir = homedirArg ? homedirArg.slice("--homedir=".length) : "~";
 
 // Expose a minimal API to the renderer process
 contextBridge.exposeInMainWorld("electronAPI", {
   isElectron: true,
   platform: process.platform,
-  homedir: os.homedir(),
+  homedir,
 
   // Filesystem
   fs: {
@@ -19,6 +22,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     listFiles: (dir) => ipcRenderer.invoke("fs:listFiles", dir),
     listAllFiles: () => ipcRenderer.invoke("fs:listAllFiles"),
     getAllFiles: () => ipcRenderer.invoke("fs:getAllFiles"),
+    searchFiles: (keywords, maxResults) =>
+      ipcRenderer.invoke("fs:searchFiles", keywords, maxResults),
   },
 
   // Interactive shell sessions
@@ -152,6 +157,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Git operations
   git: {
+    isRepo: (cwd) => ipcRenderer.invoke("git:isRepo", cwd),
     status: (cwd) => ipcRenderer.invoke("git:status", cwd),
     statusDetailed: (cwd) => ipcRenderer.invoke("git:statusDetailed", cwd),
     diff: (cwd, ref, filepath) =>
