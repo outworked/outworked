@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.1.8-green.svg" alt="Version" /></a>
+  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.2.0-green.svg" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%203.0-blue.svg" alt="License: GPL-3.0" /></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg" alt="Platform" />
   <img src="https://img.shields.io/badge/electron-41-47848F.svg" alt="Electron" />
@@ -20,8 +20,8 @@
 <p align="center"><em>No build steps, no config, no API keys. Just a .dmg and your Claude Code login.</em></p>
 
 <p align="center">
-  <a href="https://github.com/outworked/outworked/releases/tag/v0.1.8">
-    <img src="https://img.shields.io/badge/Download_Latest_Release-v0.1.8-brightgreen?style=for-the-badge&logo=github" alt="Download Latest Release" />
+  <a href="https://github.com/outworked/outworked/releases/tag/v0.2.0">
+    <img src="https://img.shields.io/badge/Download_Latest_Release-v0.2.0-brightgreen?style=for-the-badge&logo=github" alt="Download Latest Release" />
   </a>
 </p>
 
