@@ -572,12 +572,11 @@ ${hasTeam ? `- Delegate ALL work. NEVER write code, edit files, or run commands 
     ...(sessionId ? {} : { systemPrompt }),
     agents: Object.keys(agentDefs).length > 0 ? agentDefs : undefined,
     enableAgentTeams: !!enableAgentTeams,
-    // 'acceptEdits' auto-approves file-write operations without prompting.
-    // This is intentional: because the Boss runs in -p mode, stdin is closed
-    // after the initial prompt and interactive permission responses are
-    // impossible. 'acceptEdits' ensures file edits are never blocked while
-    // still requiring explicit approval for higher-risk tools (e.g. bash).
-    permissionMode: 'acceptEdits',
+    // When permission prompts are enabled, 'default' mode routes unapproved
+    // tools through the canUseTool callback which prompts the user via the UI.
+    // When disabled, 'acceptEdits' auto-approves most operations.
+    permissionMode: (typeof localStorage !== 'undefined' && localStorage.getItem('outworked_permission_prompts') !== '0')
+      ? 'default' : 'acceptEdits',
     continueSession: !!sessionId,
     resumeSessionId: sessionId,
   };

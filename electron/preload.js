@@ -70,6 +70,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     abort: (reqId) => ipcRenderer.invoke("claude-code:abort", reqId),
     sendInput: (reqId, text) =>
       ipcRenderer.invoke("claude-code:sendInput", reqId, text),
+    resolvePermission: (permId, allow) =>
+      ipcRenderer.invoke("claude-code:resolvePermission", permId, allow),
+    onPermissionRequest: (cb) => {
+      const listener = (_event, reqId, request) => cb(reqId, request);
+      ipcRenderer.on("claude-code:permission-request", listener);
+      return () => ipcRenderer.removeListener("claude-code:permission-request", listener);
+    },
     onChunk: (cb) => {
       const listener = (_event, reqId, data) => cb(reqId, data);
       ipcRenderer.on("claude-code:chunk", listener);

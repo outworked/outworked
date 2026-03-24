@@ -202,7 +202,8 @@ async function callClaudeCodeAdvanced(
     allowedTools: subDef?.tools,
     disallowedTools: subDef?.disallowedTools,
     maxTurns: subDef?.maxTurns,
-    permissionMode: (subDef?.permissionMode as ClaudeCodeAdvancedOptions['permissionMode']) || 'acceptEdits',
+    permissionMode: (subDef?.permissionMode as ClaudeCodeAdvancedOptions['permissionMode'])
+      || (localStorage.getItem('outworked_permission_prompts') !== '0' ? 'default' : 'acceptEdits'),
     mcpServers: subDef?.mcpServers,
     continueSession: isResume,
     resumeSessionId: agent?.sessionId,

@@ -25,6 +25,8 @@ interface ClaudeCodeAPI {
   startAdvanced: (options: ClaudeCodeAdvancedOptions) => Promise<number>;
   abort: (reqId: number) => Promise<boolean>;
   sendInput: (reqId: number, text: string) => Promise<boolean>;
+  resolvePermission: (permId: string, allow: boolean) => Promise<boolean>;
+  onPermissionRequest: (cb: (reqId: number, request: { permId: string; tool: string; input?: Record<string, unknown>; description: string; agentName?: string }) => void) => () => void;
   onChunk: (cb: (reqId: number, data: string) => void) => () => void;
   onEvent: (cb: (reqId: number, event: ClaudeCodeEvent) => void) => () => void;
   onStderr: (cb: (reqId: number, data: string) => void) => () => void;
@@ -256,8 +258,11 @@ export async function runClaudeCode(
 
 export interface PermissionRequest {
   reqId: number;
+  permId: string;
   tool: string;
+  input?: Record<string, unknown>;
   description: string;
+  agentName?: string;
 }
 
 export interface ClaudeCodeStreamCallbacks {
@@ -354,6 +359,19 @@ export async function runClaudeCodeAdvanced(
       callbacks.onStderr?.(data);
     });
 
+    // Listen for permission requests from the SDK's canUseTool handler
+    const removePermission = api.claudeCode!.onPermissionRequest((id, raw) => {
+      if (id !== reqId) return;
+      callbacks.onPermissionRequest?.({
+        reqId: id,
+        permId: raw.permId,
+        tool: raw.tool,
+        input: raw.input,
+        description: raw.description,
+        agentName: raw.agentName,
+      });
+    });
+
     const removeDone = api.claudeCode!.onDone((id, code, error) => {
       if (id !== reqId) return;
       cleanup();
@@ -371,6 +389,7 @@ export async function runClaudeCodeAdvanced(
     function cleanup() {
       removeEvent();
       removeStderr();
+      removePermission();
       removeDone();
     }
   });
@@ -403,6 +422,31 @@ export async function sendClaudeCodeInput(reqId: number, text: string): Promise<
   const api = getAPI();
   if (!api?.claudeCode) return false;
   return api.claudeCode.sendInput(reqId, text);
+}
+
+export async function resolveClaudePermission(permId: string, allow: boolean): Promise<boolean> {
+  const api = getAPI();
+  if (!api?.claudeCode?.resolvePermission) {
+    console.warn('[terminal] resolveClaudePermission: API not available');
+    return false;
+  }
+  const result = await api.claudeCode.resolvePermission(permId, allow);
+  return result;
+}
+
+export function onClaudePermissionRequest(cb: (reqId: number, request: PermissionRequest) => void): () => void {
+  const api = getAPI();
+  if (!api?.claudeCode?.onPermissionRequest) return () => {};
+  return api.claudeCode.onPermissionRequest((reqId, raw) => {
+    cb(reqId, {
+      reqId,
+      permId: raw.permId,
+      tool: raw.tool,
+      input: raw.input,
+      description: raw.description,
+      agentName: raw.agentName,
+    });
+  });
 }
 
 export async function readClaudeAgentFiles(cwd?: string): Promise<AgentFileInfo[]> {

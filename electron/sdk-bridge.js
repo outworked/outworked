@@ -58,6 +58,24 @@ function getClaudeExecutablePath() {
 // Active sessions: reqId → { abortController, done: boolean }
 const activeSessions = new Map();
 
+// Pending permission requests: permId → { resolve }
+// Used by canUseTool to wait for user approval from the renderer.
+const pendingPermissions = new Map();
+
+/**
+ * Resolve a pending permission request from the renderer.
+ * @param {string} permId - Permission request ID
+ * @param {boolean} allow - Whether to allow the tool use
+ * @returns {boolean} true if the permission was found and resolved
+ */
+function resolvePermission(permId, allow) {
+  const pending = pendingPermissions.get(permId);
+  if (!pending) return false;
+  pendingPermissions.delete(permId);
+  pending.resolve(allow);
+  return true;
+}
+
 /**
  * Start an SDK session. Streams SDKMessage objects via the onMessage callback.
  * Returns the final result when the session completes.
@@ -104,14 +122,17 @@ async function startSession(reqId, options, callbacks) {
         append: options.appendSystemPrompt,
       };
     } else {
-      sdkOptions.systemPrompt = options.systemPrompt + "\n\n" + options.appendSystemPrompt;
+      sdkOptions.systemPrompt =
+        options.systemPrompt + "\n\n" + options.appendSystemPrompt;
     }
   }
   if (options.model) sdkOptions.model = options.model;
   if (options.maxTurns) sdkOptions.maxTurns = options.maxTurns;
   if (options.maxBudget) sdkOptions.maxBudgetUsd = options.maxBudget;
-  if (options.permissionMode) sdkOptions.permissionMode = options.permissionMode;
-  if (options.dangerouslySkipPermissions) sdkOptions.allowDangerouslySkipPermissions = true;
+  if (options.permissionMode)
+    sdkOptions.permissionMode = options.permissionMode;
+  if (options.dangerouslySkipPermissions)
+    sdkOptions.allowDangerouslySkipPermissions = true;
 
   // Tool permissions
   if (options.allowedTools && options.allowedTools.length > 0) {
@@ -172,6 +193,60 @@ async function startSession(reqId, options, callbacks) {
     sdkOptions.stderr = (data) => callbacks.onStderr(reqId, data);
   }
 
+  // Permission request handler — prompts the user via IPC when a tool
+  // isn't explicitly allowed or denied by the permission rules.
+  if (callbacks.onPermissionRequest) {
+    // Track recently approved tools to auto-approve repeat requests
+    // (the SDK may ask multiple times for the same tool, e.g. for subagents)
+    const recentApprovals = new Map(); // key → expiry timestamp
+
+    sdkOptions.canUseTool = async (toolName, input, context) => {
+      // Build a key from tool name + command/path to identify duplicate requests
+      const inputKey = input?.command || input?.file_path || input?.path || "";
+      const approvalKey = `${toolName}:${inputKey}`;
+
+      // Auto-approve if this exact tool+input was approved within the last 30s
+      const expiry = recentApprovals.get(approvalKey);
+      if (expiry && Date.now() < expiry) {
+        return {
+          behavior: "allow",
+          updatedInput: input || {},
+          updatedPermissions: context?.suggestions,
+        };
+      }
+
+      const permId = `${reqId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+      const description =
+        context?.title || context?.description || `Wants to use ${toolName}`;
+
+      // Send permission request to the renderer
+      callbacks.onPermissionRequest(reqId, {
+        permId,
+        tool: toolName,
+        input: input || {},
+        description,
+        agentName: context?.agentID,
+      });
+
+      // Wait for the user to approve or deny
+      const allowed = await new Promise((resolve) => {
+        pendingPermissions.set(permId, { resolve });
+      });
+
+      if (allowed) {
+        // Cache the approval for 30s to avoid re-prompting for the same tool
+        recentApprovals.set(approvalKey, Date.now() + 30_000);
+        return {
+          behavior: "allow",
+          updatedInput: input || {},
+          updatedPermissions: context?.suggestions,
+        };
+      } else {
+        return { behavior: "deny", message: "User denied permission" };
+      }
+    };
+  }
+
   try {
     const q = query({
       prompt: options.prompt || "",
@@ -196,12 +271,19 @@ async function startSession(reqId, options, callbacks) {
     activeSessions.delete(reqId);
 
     const isError = lastResult?.is_error || false;
-    callbacks.onDone(reqId, isError ? 1 : 0, null, lastResult ? {
-      text: lastResult.result || "",
-      sessionId: lastResult.session_id,
-      cost: lastResult.total_cost_usd,
-      usage: lastResult.usage,
-    } : null);
+    callbacks.onDone(
+      reqId,
+      isError ? 1 : 0,
+      null,
+      lastResult
+        ? {
+            text: lastResult.result || "",
+            sessionId: lastResult.session_id,
+            cost: lastResult.total_cost_usd,
+            usage: lastResult.usage,
+          }
+        : null,
+    );
 
     return lastResult;
   } catch (err) {
@@ -258,4 +340,5 @@ module.exports = {
   abortSession,
   hasActiveSessions,
   abortAll,
+  resolvePermission,
 };

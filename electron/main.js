@@ -455,6 +455,15 @@ function setupShellIPC() {
           mainWindow.webContents.send("claude-code:stderr", id, data);
         }
       },
+      onPermissionRequest: (id, request) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(
+            "claude-code:permission-request",
+            id,
+            request,
+          );
+        }
+      },
       onDone: (id, code, error, result) => {
         syncCaffeinate();
         // Emit a synthetic result event as a fallback if the generator
@@ -480,12 +489,14 @@ function setupShellIPC() {
     return reqId;
   });
 
-  // Send input to a running Claude Code session.
-  // NOTE: The SDK handles permissions via permissionMode and allowedTools
-  // configuration, not via stdin. This handler is kept for API compatibility
-  // but is effectively a no-op with the SDK.
+  // Send input to a running Claude Code session (legacy — no-op with SDK).
   ipcMain.handle("claude-code:sendInput", (_event, _reqId, _text) => {
     return false;
+  });
+
+  // Resolve a pending permission request from the renderer.
+  ipcMain.handle("claude-code:resolvePermission", (_event, permId, allow) => {
+    return sdkBridge.resolvePermission(permId, allow);
   });
 
   // List available subagents from the claude CLI

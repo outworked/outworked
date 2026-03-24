@@ -128,6 +128,9 @@ export default function App() {
   const [agentTeamsEnabled, setAgentTeamsEnabled] = useState(
     () => localStorage.getItem("outworked_agent_teams") === "1",
   );
+  const [permissionPromptsEnabled, setPermissionPromptsEnabled] = useState(
+    () => localStorage.getItem("outworked_permission_prompts") !== "0",
+  );
   const [claudeReady, setClaudeReady] = useState(false);
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null);
   const [showWorkspacePicker, setShowWorkspacePicker] = useState(false);
@@ -397,7 +400,10 @@ export default function App() {
 
     if (claudeReady && !description) {
       // No AI generation — create the .md file immediately
-      const filePath = await createClaudeAgentFile(agent, workspaceDir || undefined);
+      const filePath = await createClaudeAgentFile(
+        agent,
+        workspaceDir || undefined,
+      );
       if (filePath) {
         agent.subagentFile = filePath;
         agent.subagentDef = { description: agent.role };
@@ -445,7 +451,10 @@ export default function App() {
           updateAgent(updatedAgent);
         } else {
           // AI failed — fall back to creating a bare stub
-          const filePath = await createClaudeAgentFile(agent, workspaceDir || undefined);
+          const filePath = await createClaudeAgentFile(
+            agent,
+            workspaceDir || undefined,
+          );
           updateAgent({
             ...agent,
             subagentFile: filePath || undefined,
@@ -728,6 +737,19 @@ export default function App() {
             className={`w-full btn-pixel text-[10px] ${agentTeamsEnabled ? "bg-indigo-700 hover:bg-indigo-600 text-indigo-50" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
           >
             {agentTeamsEnabled ? "👥 Teams ON" : "👤 Teams OFF"}
+          </button>
+          <button
+            onClick={() => {
+              const next = !permissionPromptsEnabled;
+              setPermissionPromptsEnabled(next);
+              localStorage.setItem(
+                "outworked_permission_prompts",
+                next ? "1" : "0",
+              );
+            }}
+            className={`w-full btn-pixel text-[10px] ${!permissionPromptsEnabled ? "bg-amber-700 hover:bg-amber-600 text-amber-50" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
+          >
+            {permissionPromptsEnabled ? "🔒 Auto Edit OFF" : "🔓 Auto Edit ON"}
           </button>
           <NotificationCenter
             notifications={notifications}
