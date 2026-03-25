@@ -12,7 +12,12 @@ import {
 } from "../lib/types";
 import { sendMessage, sendMessageWithCost } from "../lib/ai";
 import { addCumulativeCost } from "../lib/costs";
-import { executeTask, routeTasks } from "../lib/orchestrator";
+import {
+  executeTask,
+  routeTasks,
+  routeTasksViaClaudeCode,
+} from "../lib/orchestrator";
+import type { AgentTeamCallbacks } from "../lib/orchestrator";
 import { createAgent, createClaudeAgentFile } from "../lib/storage";
 import { resolveClaudePermission, PermissionRequest } from "../lib/terminal";
 import {
@@ -62,6 +67,7 @@ const STATUS_COLORS: Record<string, string> = {
   speaking: "#3b82f6",
   "waiting-input": "#f97316",
   "waiting-approval": "#eab308",
+  slow: "#eab308",
   stuck: "#ef4444",
   collaborating: "#8b5cf6",
   background: "#6366f1",
@@ -75,6 +81,7 @@ const STATUS_LABELS: Record<string, string> = {
   collaborating: "Collaborating…",
   "waiting-input": "Needs input",
   "waiting-approval": "Needs approval",
+  slow: "Slow",
   stuck: "Stuck",
   background: "Running in background",
 };
@@ -153,6 +160,7 @@ export default function ChatWindow({
 }: ChatWindowProps) {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingAgentId, setStreamingAgentId] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState("");
   const [pendingPermission, setPendingPermission] =
     useState<PermissionRequest | null>(null);
@@ -161,6 +169,7 @@ export default function ChatWindow({
   const [toolCalls, setToolCalls] = useState<
     { name: string; args: string; timestamp: number }[]
   >([]);
+  const [thinkingPreview, setThinkingPreview] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [sessionList, setSessionList] = useState<SessionMeta[]>([]);
   const [sessionSearch, setSessionSearch] = useState("");
@@ -292,7 +301,15 @@ export default function ChatWindow({
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [agent?.history, streamingText]);
+  }, [
+    agent?.history,
+    streamingText,
+    thinkingPreview,
+    toolCalls,
+    agent?.liveStreamText,
+    agent?.liveToolCalls,
+    agent?.liveThinking,
+  ]);
 
   useEffect(() => {
     debugBottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -315,8 +332,10 @@ export default function ChatWindow({
     setInput("");
     setWorkStartedAt(Date.now());
     setIsStreaming(true);
+    setStreamingAgentId(agent.id);
     setStreamingText("");
     setToolCalls([]);
+    setThinkingPreview("");
 
     const userMsg: Message = {
       role: "user",
@@ -352,11 +371,19 @@ export default function ChatWindow({
       addDebug(`User: ${userText.slice(0, 200)}`);
     }
 
+    // Boss orchestration updates todos during execution (Step 4 & 6).
+    // Capture them here so the final agent update doesn't overwrite them
+    // with the stale pre-orchestration updatedWithUser.
+    let orchestrationTodos: AgentTodo[] | undefined;
+
     try {
       let reply: string;
 
-      if (isBoss) {
-        // Boss = orchestrator. Route the user's message through the orchestrator pipeline.
+      if (isBoss && agentTeamsEnabled) {
+        // Agent Teams mode: let Claude Code handle orchestration natively
+        reply = await handleBossAgentTeams(updatedWithUser, userText);
+      } else if (isBoss) {
+        // Custom orchestrator: plan tasks, then dispatch to employees
         reply = await handleBossOrchestrate(updatedWithUser, userText);
       } else {
         // Regular agent: direct chat with tools
@@ -370,6 +397,8 @@ export default function ChatWindow({
       };
       const finalAgent: Agent = {
         ...updatedWithUser,
+        // Preserve orchestration todos — updatedWithUser has stale pre-orchestration state
+        ...(orchestrationTodos && { todos: orchestrationTodos }),
         history: [...updatedWithUser.history, assistantMsg],
         status: "idle",
         currentThought: reply.slice(0, 80) + (reply.length > 80 ? "..." : ""),
@@ -527,6 +556,159 @@ export default function ChatWindow({
       return "\n\nColleague responses:\n" + answers.join("\n");
     }
 
+    // ── Boss Agent Teams flow (native Claude Code orchestration) ──
+    // Claude Code itself coordinates the teammates — we just wire up
+    // callbacks so the UI stays in sync.
+    async function handleBossAgentTeams(
+      bossAgent: Agent,
+      userText: string,
+    ): Promise<string> {
+      clearExchanges();
+
+      onUpdateAgent({
+        ...bossAgent,
+        status: "working",
+        currentThought: "Delegating via Agent Teams...",
+      });
+      setStreamingText("🤖 Running via Agent Teams...\n");
+      if (debugMode) addDebug(`[teams] Starting Agent Teams orchestration`);
+
+      const callbacks: AgentTeamCallbacks = {
+        onTeamEvent: (event) => {
+          if (event.type === "text" && event.text) {
+            setStreamingText((s) => s + event.text);
+          }
+          if (event.type === "tool_use" && event.text) {
+            if (debugMode) addDebug(`[teams] ${event.text}`);
+          }
+        },
+        onAgentStatus: (agentName, status, thought) => {
+          const emp = agents.find(
+            (a) => a.name.toLowerCase() === agentName.toLowerCase(),
+          );
+          if (emp) {
+            onUpdateAgent({
+              ...emp,
+              status:
+                status === "working"
+                  ? "working"
+                  : status === "done"
+                    ? "idle"
+                    : status === "waiting-input"
+                      ? "thinking"
+                      : status === "waiting-approval"
+                        ? "thinking"
+                        : status === "slow"
+                          ? "slow"
+                          : status === "stuck"
+                            ? "stuck"
+                            : emp.status,
+              currentThought: thought || "",
+            });
+          }
+          if (debugMode)
+            addDebug(`[teams] ${agentName} → ${status}: ${thought || ""}`);
+        },
+        onNewAgent: (agentName, description) => {
+          if (debugMode)
+            addDebug(
+              `[teams] New agent requested: ${agentName} — ${description}`,
+            );
+          const existing = agents.find(
+            (a) => a.name.toLowerCase() === agentName.toLowerCase(),
+          );
+          if (!existing) {
+            const newAgent = createAgent(
+              {
+                name: agentName,
+                role: description,
+                personality: description,
+                position: {
+                  x: Math.floor(Math.random() * 10) + 2,
+                  y: Math.floor(Math.random() * 6) + 2,
+                },
+                autoCreated: true,
+              },
+              true,
+            );
+            onAddAgent(newAgent);
+          }
+        },
+        onPermissionRequest: (agentName, tool, description, reqId) => {
+          if (onPermissionNotification && agentName) {
+            onPermissionNotification(agentName, {
+              tool,
+              description,
+              reqId,
+            } as PermissionRequest);
+          }
+        },
+      };
+
+      try {
+        const result = await routeTasksViaClaudeCode(
+          userText,
+          agents,
+          callbacks,
+          abortRef.current?.signal,
+          debugMode ? (line) => addDebug(line) : undefined,
+          bossAgent.sessionId,
+          true, // enableAgentTeams
+        );
+
+        // Track cost
+        if (result.cost && result.cost > 0) {
+          addCumulativeCost(
+            bossAgent.id,
+            bossAgent.name,
+            result.cost,
+            result.inputTokens || 0,
+            result.outputTokens || 0,
+            bossAgent.id,
+          );
+        }
+
+        // Persist session for resume
+        if (result.sessionId) {
+          onUpdateAgent({
+            ...bossAgent,
+            sessionId: result.sessionId,
+            status: "idle",
+            currentThought: "Agent Teams run complete",
+          });
+        } else {
+          onUpdateAgent({
+            ...bossAgent,
+            status: "idle",
+            currentThought: "Agent Teams run complete",
+          });
+        }
+
+        // Reset employee statuses
+        for (const emp of agents.filter((a) => !a.isBoss)) {
+          onUpdateAgent({ ...emp, status: "idle", currentThought: "" });
+        }
+
+        onOrchestrationDone?.({
+          success: 1,
+          failed: 0,
+          plan: "Agent Teams orchestration",
+          agents: agents.filter((a) => !a.isBoss).map((a) => a.name),
+        });
+
+        return result.text || "(No output from Agent Teams)";
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "Unknown error";
+        if (debugMode) addDebug(`[teams] Error: ${errMsg}`);
+        onUpdateAgent({
+          ...bossAgent,
+          status: "idle",
+          currentThought: "",
+        });
+        throw err;
+      }
+    }
+
     // ── Boss orchestrator flow ───────────────────────────────────
     // The Boss ALWAYS delegates: plans tasks via JSON, then dispatches
     // each task to the assigned employee as a separate Claude Code process.
@@ -568,6 +750,14 @@ export default function ChatWindow({
           result.outputTokens || 0,
           bossAgent.id,
         );
+      }
+
+      // If the boss answered directly (simple question), return immediately
+      if (result.directAnswer) {
+        if (debugMode) addDebug(`[boss] Answered directly — no delegation needed`);
+        onUpdateAgent({ ...bossAgent, status: "idle", currentThought: "" });
+        setStreamingText("");
+        return result.directAnswer;
       }
 
       if (debugMode)
@@ -627,8 +817,12 @@ export default function ChatWindow({
         .filter((a) => a.agentId);
 
       if (assignments.length === 0) {
-        onUpdateAgent({ ...bossAgent, status: "idle", currentThought: "" });
-        return "I couldn't assign any tasks. Try hiring employees with the right skills first, then tell me what you need.";
+        // No tasks to delegate — answer the user directly instead of failing
+        if (debugMode) addDebug(`[boss] No assignments — falling back to direct answer`);
+        onUpdateAgent({ ...bossAgent, status: "thinking", currentThought: "Answering directly..." });
+        setStreamingText("");
+        const directReply = await handleRegularChat(bossAgent, userText);
+        return directReply;
       }
 
       // ── Step 4: Create todos on Boss ──
@@ -754,6 +948,9 @@ export default function ChatWindow({
             ...currentAgent,
             status: "working",
             currentThought: `Working: ${assignment.task.slice(0, 60)}...`,
+            liveStreamText: "",
+            liveToolCalls: [],
+            liveThinking: "",
           });
           if (debugMode)
             addDebug(
@@ -780,6 +977,20 @@ export default function ChatWindow({
             if (prevContext) {
               taskPrompt += `\n\nContext from previous group's work:\n${prevContext}`;
             }
+
+            // Add the task instruction to the agent's chat history immediately
+            // so it's visible when clicking on the agent while they work
+            const taskUserMsg: Message = {
+              role: "user",
+              content: `**Task from Boss:** ${assignment.task}\n\n${checklist}`,
+              timestamp: Date.now(),
+            };
+            currentAgent = {
+              ...currentAgent,
+              history: [...currentAgent.history, taskUserMsg],
+            };
+            onUpdateAgent(currentAgent);
+
             const {
               agent: updatedAgent,
               reply,
@@ -795,6 +1006,7 @@ export default function ChatWindow({
                   ...currentAgent,
                   status: "working",
                   currentThought: partial.slice(0, 70),
+                  liveStreamText: partial,
                 }),
               abortRef.current?.signal,
               skills,
@@ -803,6 +1015,91 @@ export default function ChatWindow({
               allEmployees
                 .filter((a) => a.id !== currentAgent.id)
                 .map((a) => ({ name: a.name, role: a.role })),
+              // Stream tool calls into the agent's live state
+              (call) => {
+                const toolLabel =
+                  call.name +
+                  (call.args.file_path
+                    ? ` ${call.args.file_path}`
+                    : call.args.command
+                      ? ` ${call.args.command}`
+                      : "");
+                onUpdateAgent({
+                  ...currentAgent,
+                  status: "working",
+                  currentThought: toolLabel,
+                  liveToolCalls: [
+                    ...(currentAgent.liveToolCalls ?? []),
+                    { name: call.name, args: toolLabel, timestamp: Date.now() },
+                  ],
+                });
+                // Keep currentAgent in sync for subsequent calls
+                currentAgent = {
+                  ...currentAgent,
+                  liveToolCalls: [
+                    ...(currentAgent.liveToolCalls ?? []),
+                    { name: call.name, args: toolLabel, timestamp: Date.now() },
+                  ],
+                };
+              },
+              // Stream Claude Code events into the agent's live state
+              (event) => {
+                if (event.type === "tool_use" && event.toolName) {
+                  const label = `${event.toolName}${event.toolInput?.file_path ? ` ${event.toolInput.file_path}` : ""}`;
+                  onUpdateAgent({
+                    ...currentAgent,
+                    status: "working",
+                    currentThought: label,
+                    liveToolCalls: [
+                      ...(currentAgent.liveToolCalls ?? []),
+                      {
+                        name: event.toolName,
+                        args: label,
+                        timestamp: Date.now(),
+                      },
+                    ],
+                  });
+                  currentAgent = {
+                    ...currentAgent,
+                    liveToolCalls: [
+                      ...(currentAgent.liveToolCalls ?? []),
+                      {
+                        name: event.toolName,
+                        args: label,
+                        timestamp: Date.now(),
+                      },
+                    ],
+                  };
+                } else if (event.type === "assistant" && event.text) {
+                  const preview = event.text.slice(0, 100).replace(/\n/g, " ");
+                  if (preview.trim()) {
+                    onUpdateAgent({
+                      ...currentAgent,
+                      status: "thinking",
+                      currentThought:
+                        preview + (event.text.length > 100 ? "..." : ""),
+                      liveThinking:
+                        preview + (event.text.length > 100 ? "..." : ""),
+                    });
+                  }
+                }
+              },
+              // Slow warning (2 min): soft banner, no abort
+              (agentName) => {
+                onUpdateAgent({
+                  ...currentAgent,
+                  status: "slow",
+                  currentThought: `No progress for 2 minutes — may be running a long operation`,
+                });
+              },
+              // Stuck detection (5 min): enables abort
+              (agentName) => {
+                onUpdateAgent({
+                  ...currentAgent,
+                  status: "stuck",
+                  currentThought: `No progress for 5 minutes`,
+                });
+              },
             );
 
             // Track cost for boss-delegated tasks
@@ -825,8 +1122,15 @@ export default function ChatWindow({
             const fullReply = reply + collabContext;
 
             const subtaskIds = new Set(subtaskTodos.map((st) => st.id));
+            // Build final history: our display-friendly task message + the assistant reply
+            const assistantReplyMsg: Message = {
+              role: "assistant",
+              content: fullReply,
+              timestamp: Date.now(),
+            };
             currentAgent = {
               ...updatedAgent,
+              history: [taskUserMsg, assistantReplyMsg],
               todos: updatedAgent.todos.map((t) =>
                 subtaskIds.has(t.id) ? { ...t, status: "done" as const } : t,
               ),
@@ -835,6 +1139,9 @@ export default function ChatWindow({
               ...currentAgent,
               status: "idle",
               currentThought: "",
+              liveStreamText: undefined,
+              liveToolCalls: undefined,
+              liveThinking: undefined,
             });
 
             bossTodos[idx] = { ...bossTodos[idx], status: "done" };
@@ -859,6 +1166,9 @@ export default function ChatWindow({
               ...currentAgent,
               status: "idle",
               currentThought: "",
+              liveStreamText: undefined,
+              liveToolCalls: undefined,
+              liveThinking: undefined,
             });
 
             bossTodos[idx] = { ...bossTodos[idx], status: "error" };
@@ -920,14 +1230,17 @@ export default function ChatWindow({
 
       // ── Step 6: Summary ──
       // Update boss todos (bossAgent is stale but bossTodos were mutated with correct statuses)
+      const finalBossTodos = [
+        ...(bossAgent.todos || []).filter(
+          (t) => !bossTodos.some((bt) => bt.id === t.id),
+        ),
+        ...bossTodos,
+      ];
+      // Capture for the outer handleSend so the final agent update preserves them
+      orchestrationTodos = finalBossTodos;
       onUpdateAgent({
         ...bossAgent,
-        todos: [
-          ...(bossAgent.todos || []).filter(
-            (t) => !bossTodos.some((bt) => bt.id === t.id),
-          ),
-          ...bossTodos,
-        ],
+        todos: finalBossTodos,
         status: "idle",
         currentThought: "All tasks completed",
       });
@@ -1032,6 +1345,7 @@ export default function ChatWindow({
               ...prev,
               { name: call.name, args: toolLabel, timestamp: Date.now() },
             ]);
+            setThinkingPreview(toolLabel);
             onUpdateAgent({
               ...agentState,
               status: "working",
@@ -1060,6 +1374,20 @@ export default function ChatWindow({
                     status: "working",
                     currentThought: `🔧 ${label}`,
                   });
+                } else if (event.type === "assistant" && event.text) {
+                  // Stream thinking/text updates — show a preview in currentThought and activity feed
+                  const preview = event.text.slice(0, 100).replace(/\n/g, " ");
+                  if (preview.trim()) {
+                    setThinkingPreview(
+                      preview + (event.text.length > 100 ? "…" : ""),
+                    );
+                    onUpdateAgent({
+                      ...agentState,
+                      status: "thinking",
+                      currentThought:
+                        preview + (event.text.length > 100 ? "…" : ""),
+                    });
+                  }
                 }
               }
             : undefined,
@@ -1393,17 +1721,20 @@ export default function ChatWindow({
         );
       })()}
 
-      {/* Status — enhanced for waiting/stuck states */}
-      {(agent.status === "stuck" ||
+      {/* Status — enhanced for waiting/slow/stuck states */}
+      {(agent.status === "slow" ||
+        agent.status === "stuck" ||
         agent.status === "waiting-input" ||
         agent.status === "waiting-approval") && (
         <div
           className={`px-3 py-2 border-b border-slate-600 ${
             agent.status === "stuck"
               ? "bg-red-900/30 border-red-700/40"
-              : agent.status === "waiting-approval"
-                ? "bg-amber-900/30 border-amber-700/40"
-                : "bg-orange-900/30 border-orange-700/40"
+              : agent.status === "slow"
+                ? "bg-yellow-900/30 border-yellow-700/40"
+                : agent.status === "waiting-approval"
+                  ? "bg-amber-900/30 border-amber-700/40"
+                  : "bg-orange-900/30 border-orange-700/40"
           }`}
         >
           <div className="flex items-center gap-2">
@@ -1412,25 +1743,31 @@ export default function ChatWindow({
             >
               {agent.status === "stuck"
                 ? "⚠️"
-                : agent.status === "waiting-approval"
-                  ? "🔒"
-                  : "⏸️"}
+                : agent.status === "slow"
+                  ? "🐢"
+                  : agent.status === "waiting-approval"
+                    ? "🔒"
+                    : "⏸️"}
             </span>
             <div className="flex-1 min-w-0">
               <p
                 className={`text-[11px] font-pixel ${
                   agent.status === "stuck"
                     ? "text-red-300"
-                    : agent.status === "waiting-approval"
-                      ? "text-amber-300"
-                      : "text-orange-300"
+                    : agent.status === "slow"
+                      ? "text-yellow-300"
+                      : agent.status === "waiting-approval"
+                        ? "text-amber-300"
+                        : "text-orange-300"
                 }`}
               >
                 {agent.status === "stuck"
-                  ? "Agent is stuck — no progress detected"
-                  : agent.status === "waiting-approval"
-                    ? "Waiting for permission approval"
-                    : "Waiting for more instructions"}
+                  ? "Agent appears stuck — no progress for 5 minutes"
+                  : agent.status === "slow"
+                    ? "Agent may be running a long operation"
+                    : agent.status === "waiting-approval"
+                      ? "Waiting for permission approval"
+                      : "Waiting for more instructions"}
               </p>
               {agent.currentThought && (
                 <p className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
@@ -1441,13 +1778,20 @@ export default function ChatWindow({
             {agent.status === "stuck" && (
               <button
                 onClick={() => {
-                  setInput(
-                    `The previous task seems stuck. Please try a different approach or let me know what's blocking you.`,
-                  );
+                  // Abort the hung task so the agent goes idle
+                  abortRef.current?.abort();
+                  onUpdateAgent({
+                    ...agent,
+                    status: "idle",
+                    currentThought: "",
+                    liveStreamText: "",
+                    liveToolCalls: [],
+                    liveThinking: "",
+                  });
                 }}
                 className="btn-pixel text-[9px] bg-red-700 hover:bg-red-600 text-white px-2 py-0.5 shrink-0"
               >
-                Nudge
+                Unstick
               </button>
             )}
             {agent.status === "waiting-input" && (
@@ -1464,41 +1808,7 @@ export default function ChatWindow({
           </div>
         </div>
       )}
-      {agent.status !== "idle" &&
-        agent.status !== "stuck" &&
-        agent.status !== "waiting-input" &&
-        agent.status !== "waiting-approval" &&
-        (isStreaming || agent.currentThought) && (
-          <div className="px-3 py-1.5 bg-slate-800/80 border-b border-slate-700/40 flex items-center gap-2">
-            <span className="relative flex h-2 w-2 shrink-0">
-              <span
-                className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
-                style={{
-                  backgroundColor: STATUS_COLORS[agent.status] ?? "#f59e0b",
-                }}
-              ></span>
-              <span
-                className="relative inline-flex rounded-full h-2 w-2"
-                style={{
-                  backgroundColor: STATUS_COLORS[agent.status] ?? "#f59e0b",
-                }}
-              ></span>
-            </span>
-            <p
-              className="text-[11px] font-mono truncate flex-1"
-              style={{ color: STATUS_COLORS[agent.status] ?? "#f59e0b" }}
-            >
-              {agent.currentThought ||
-                STATUS_LABELS[agent.status] ||
-                "Working…"}
-            </p>
-            {isStreaming && elapsed > 0 && (
-              <span className="text-[10px] font-mono text-slate-500 shrink-0">
-                {formatElapsed(elapsed)}
-              </span>
-            )}
-          </div>
-        )}
+      {/* Status bar removed — status now shown inline in the chat stream */}
 
       {/* Messages */}
       <div className="flex-1 font-mono overflow-y-auto px-3 py-2 space-y-2">
@@ -1636,16 +1946,27 @@ export default function ChatWindow({
             </div>
           );
         })}
-        {isStreaming && (
-          <div className="space-y-2">
-            {/* Activity feed - always visible while working */}
-            <div className="mx-1 rounded-lg border border-slate-700/50 bg-slate-800/50 overflow-hidden">
-              {/* Header with elapsed time and phase */}
-              <div className="flex items-center justify-between px-2.5 py-1.5 bg-slate-800/80 border-b border-slate-700/30">
+        {isStreaming && streamingAgentId === agent.id && (
+          <div className="flex justify-start">
+            <div className="max-w-[90%] w-full rounded-lg overflow-hidden bg-slate-700/80 border border-slate-600/40">
+              {/* Live streaming header */}
+              <div className="flex items-center justify-between px-2.5 py-1.5 bg-slate-800/60 border-b border-slate-600/30">
                 <div className="flex items-center gap-2">
-                  <span className="relative flex h-2 w-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-400"></span>
+                  <span className="relative flex h-2 w-2 shrink-0">
+                    <span
+                      className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+                      style={{
+                        backgroundColor:
+                          STATUS_COLORS[agent.status] ?? "#f59e0b",
+                      }}
+                    ></span>
+                    <span
+                      className="relative inline-flex rounded-full h-2 w-2"
+                      style={{
+                        backgroundColor:
+                          STATUS_COLORS[agent.status] ?? "#f59e0b",
+                      }}
+                    ></span>
                   </span>
                   <span className="text-[10px] font-pixel text-slate-300">
                     {toolCalls.length > 0 ? "Working" : "Thinking"}
@@ -1656,20 +1977,28 @@ export default function ChatWindow({
                 </span>
               </div>
 
+              {/* Thinking preview — shown before tools start or between tool calls */}
+              {thinkingPreview && !streamingText && (
+                <div className="px-2.5 py-1.5 text-[11px] font-mono text-slate-300 border-b border-slate-600/20 leading-relaxed">
+                  {thinkingPreview}
+                  <span className="inline-block w-1.5 h-3 bg-slate-400 ml-0.5 animate-pulse align-middle" />
+                </div>
+              )}
+
               {/* Tool call feed */}
               {toolCalls.length > 0 && (
-                <div className="max-h-32 overflow-y-auto">
+                <div className="max-h-36 overflow-y-auto border-b border-slate-600/20">
                   {toolCalls.map((tc, i) => {
                     const isLatest = i === toolCalls.length - 1;
                     return (
                       <div
                         key={i}
-                        className={`flex items-center gap-2 px-2.5 py-1 border-b border-slate-800/30 last:border-b-0 ${isLatest ? "bg-slate-700/30" : ""}`}
+                        className={`flex items-center gap-2 px-2.5 py-1 border-b border-slate-700/20 last:border-b-0 ${isLatest ? "bg-slate-600/20" : ""}`}
                       >
                         {isLatest ? (
                           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
                         ) : (
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0" />
+                          <span className="w-1.5 h-1.5 rounded-full bg-slate-500 shrink-0" />
                         )}
                         <span
                           className={`text-[10px] font-mono truncate ${isLatest ? "text-slate-300" : "text-slate-500"}`}
@@ -1682,38 +2011,36 @@ export default function ChatWindow({
                 </div>
               )}
 
-              {/* No tool calls yet - show pulsing indicator */}
-              {toolCalls.length === 0 && !streamingText && (
+              {/* Bouncing dots when nothing else to show */}
+              {toolCalls.length === 0 && !streamingText && !thinkingPreview && (
                 <div className="px-2.5 py-2 flex items-center gap-2">
-                  <div className="flex gap-1">
+                  <div className="flex gap-1 shrink-0">
                     <span
-                      className="w-1 h-1 rounded-full bg-slate-400 animate-bounce"
+                      className="w-1 h-1 rounded-full bg-amber-400 animate-bounce"
                       style={{ animationDelay: "0ms" }}
                     />
                     <span
-                      className="w-1 h-1 rounded-full bg-slate-400 animate-bounce"
+                      className="w-1 h-1 rounded-full bg-amber-400 animate-bounce"
                       style={{ animationDelay: "150ms" }}
                     />
                     <span
-                      className="w-1 h-1 rounded-full bg-slate-400 animate-bounce"
+                      className="w-1 h-1 rounded-full bg-amber-400 animate-bounce"
                       style={{ animationDelay: "300ms" }}
                     />
                   </div>
-                  <span className="text-[10px] font-mono text-slate-500">
+                  <span className="text-[10px] font-mono text-slate-400">
                     Processing request…
                   </span>
                 </div>
               )}
-            </div>
 
-            {/* Streaming text output */}
-            {streamingText && (
-              <div className="flex justify-start">
+              {/* Streaming response text */}
+              {streamingText && (
                 <div
-                  className={`max-w-[85%] px-2.5 py-1.5 rounded text-[12px] leading-relaxed ${
+                  className={`px-2.5 py-1.5 text-[12px] leading-relaxed ${
                     streamingText.includes("completed successfully")
-                      ? "bg-emerald-950/30 border border-emerald-600/40 text-gray-100"
-                      : "bg-slate-700 text-gray-100"
+                      ? "bg-emerald-950/20 text-gray-100"
+                      : "text-gray-100"
                   }`}
                 >
                   <MarkdownMessage content={streamingText} />
@@ -1722,10 +2049,125 @@ export default function ChatWindow({
                       <span className="inline-block w-1.5 h-3 bg-gray-400 ml-0.5 animate-pulse align-middle" />
                     )}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         )}
+        {/* Live agent work view — shown when viewing an agent being orchestrated by Boss */}
+        {!(isStreaming && streamingAgentId === agent.id) &&
+          agent.status !== "idle" &&
+          agent.status !== "stuck" &&
+          agent.status !== "waiting-input" &&
+          agent.status !== "waiting-approval" &&
+          (agent.liveStreamText ||
+            agent.liveToolCalls?.length ||
+            agent.liveThinking ||
+            agent.currentThought) && (
+            <div className="flex justify-start">
+              <div className="max-w-[90%] w-full rounded-lg overflow-hidden bg-slate-700/80 border border-slate-600/40">
+                {/* Header */}
+                <div className="flex items-center justify-between px-2.5 py-1.5 bg-slate-800/60 border-b border-slate-600/30">
+                  <div className="flex items-center gap-2">
+                    <span className="relative flex h-2 w-2 shrink-0">
+                      <span
+                        className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+                        style={{
+                          backgroundColor:
+                            STATUS_COLORS[agent.status] ?? "#f59e0b",
+                        }}
+                      ></span>
+                      <span
+                        className="relative inline-flex rounded-full h-2 w-2"
+                        style={{
+                          backgroundColor:
+                            STATUS_COLORS[agent.status] ?? "#f59e0b",
+                        }}
+                      ></span>
+                    </span>
+                    <span className="text-[10px] font-pixel text-slate-300">
+                      {(agent.liveToolCalls?.length ?? 0) > 0
+                        ? "Working"
+                        : "Thinking"}
+                    </span>
+                  </div>
+                  <span
+                    className="text-[10px] font-mono"
+                    style={{ color: STATUS_COLORS[agent.status] ?? "#f59e0b" }}
+                  >
+                    {STATUS_LABELS[agent.status] || "Working…"}
+                  </span>
+                </div>
+
+                {/* Thinking preview */}
+                {agent.liveThinking && !agent.liveStreamText && (
+                  <div className="px-2.5 py-1.5 text-[11px] font-mono text-slate-300 border-b border-slate-600/20 leading-relaxed">
+                    {agent.liveThinking}
+                    <span className="inline-block w-1.5 h-3 bg-slate-400 ml-0.5 animate-pulse align-middle" />
+                  </div>
+                )}
+
+                {/* Tool call feed */}
+                {(agent.liveToolCalls?.length ?? 0) > 0 && (
+                  <div className="max-h-36 overflow-y-auto border-b border-slate-600/20">
+                    {agent.liveToolCalls!.map((tc, i) => {
+                      const isLatest = i === agent.liveToolCalls!.length - 1;
+                      return (
+                        <div
+                          key={i}
+                          className={`flex items-center gap-2 px-2.5 py-1 border-b border-slate-700/20 last:border-b-0 ${isLatest ? "bg-slate-600/20" : ""}`}
+                        >
+                          {isLatest ? (
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                          ) : (
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500 shrink-0" />
+                          )}
+                          <span
+                            className={`text-[10px] font-mono truncate ${isLatest ? "text-slate-300" : "text-slate-500"}`}
+                          >
+                            {tc.args}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* No data yet — show current thought as fallback */}
+                {!agent.liveToolCalls?.length &&
+                  !agent.liveStreamText &&
+                  !agent.liveThinking &&
+                  agent.currentThought && (
+                    <div className="px-2.5 py-2 flex items-center gap-2">
+                      <div className="flex gap-1 shrink-0">
+                        <span
+                          className="w-1 h-1 rounded-full bg-amber-400 animate-bounce"
+                          style={{ animationDelay: "0ms" }}
+                        />
+                        <span
+                          className="w-1 h-1 rounded-full bg-amber-400 animate-bounce"
+                          style={{ animationDelay: "150ms" }}
+                        />
+                        <span
+                          className="w-1 h-1 rounded-full bg-amber-400 animate-bounce"
+                          style={{ animationDelay: "300ms" }}
+                        />
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400 truncate">
+                        {agent.currentThought}
+                      </span>
+                    </div>
+                  )}
+
+                {/* Streaming response text */}
+                {agent.liveStreamText && (
+                  <div className="px-2.5 py-1.5 text-[12px] leading-relaxed text-gray-100">
+                    <MarkdownMessage content={agent.liveStreamText} />
+                    <span className="inline-block w-1.5 h-3 bg-gray-400 ml-0.5 animate-pulse align-middle" />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         {pendingPermission && (
           <div className="mx-auto max-w-[90%] bg-amber-900/40 border border-amber-600/50 rounded-lg p-3 animate-slide-up">
             <div className="flex items-center gap-2 mb-1">

@@ -49,6 +49,7 @@ interface ClaudeCodeAPI {
   onDone: (
     cb: (reqId: number, code: number, error: string | null) => void,
   ) => () => void;
+  onHeartbeat: (cb: (reqId: number) => void) => () => void;
   version: () => Promise<string | null>;
   authStatus: () => Promise<ClaudeCodeAuthStatus>;
   listAgents: (
@@ -446,6 +447,30 @@ export async function runClaudeCodeAdvanced(
     let cost: number | undefined;
     let usage: { input_tokens: number; output_tokens: number } | undefined;
 
+    // Dead-session detection: if heartbeats stop arriving from the main
+    // process for 45s, the SDK session has silently died.
+    const HEARTBEAT_DEAD_MS = 45_000;
+    let lastHeartbeat = Date.now();
+    let settled = false;
+
+    const removeHeartbeat = api.claudeCode!.onHeartbeat((id) => {
+      if (id !== reqId) return;
+      lastHeartbeat = Date.now();
+    });
+
+    const heartbeatWatchdog = setInterval(() => {
+      if (settled) return;
+      if (Date.now() - lastHeartbeat > HEARTBEAT_DEAD_MS) {
+        settled = true;
+        cleanup();
+        reject(
+          new Error(
+            "Claude Code session lost: no heartbeat from main process (session may have crashed silently)",
+          ),
+        );
+      }
+    }, 10_000);
+
     // Receive typed SDK messages directly — no NDJSON parsing needed
     const removeEvent = api.claudeCode!.onEvent(
       (id, event: ClaudeCodeEvent) => {
@@ -521,6 +546,8 @@ export async function runClaudeCodeAdvanced(
 
     const removeDone = api.claudeCode!.onDone((id, code, error) => {
       if (id !== reqId) return;
+      if (settled) return;
+      settled = true;
       cleanup();
 
       if (error) {
@@ -545,6 +572,8 @@ export async function runClaudeCodeAdvanced(
     });
 
     function cleanup() {
+      clearInterval(heartbeatWatchdog);
+      removeHeartbeat();
       removeEvent();
       removeStderr();
       removePermission();

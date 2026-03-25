@@ -12,7 +12,8 @@
     "lint": "eslint",
     "electron:dev": "vite build && VERBOSE_LOGGING=true electron .",
     "electron:build": "vite build && electron-builder --config electron-builder.yml",
-    "electron:publish": "vite build && electron-builder --config electron-builder.yml --publish always"
+    "electron:publish": "vite build && electron-builder --config electron-builder.yml --publish always",
+    "version": "bash scripts/bump-version.sh"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.81",

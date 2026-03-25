@@ -156,6 +156,18 @@ summary:focus-visible {
   padding-right: 40px;
 }
 
+@keyframes marquee-agents {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+.animate-marquee-agents {
+  animation: marquee-agents 20s linear infinite;
+}
+
 @keyframes slide-up {
   from {
     transform: translateY(20px);

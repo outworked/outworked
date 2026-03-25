@@ -115,6 +115,7 @@ export class OfficeScene extends Phaser.Scene {
   private agents: Agent[] = [];
   private agentSprites: Map<string, Phaser.GameObjects.Container> = new Map();
   private thoughtBubbles: Map<string, Phaser.GameObjects.Container> = new Map();
+  private thoughtBubbleLastUpdate: Map<string, number> = new Map();
   private onAgentClick?: (agent: Agent) => void;
   private onAgentMove?: (agentId: string, x: number, y: number) => void;
   private onFurnitureMove?: (items: FurnitureItem[]) => void;
@@ -464,11 +465,18 @@ export class OfficeScene extends Phaser.Scene {
           thought: agent.currentThought ?? "",
           collaboratingWith: agent.collaboratingWith,
         });
-        if (this.thoughtBubbles.has(agent.id)) {
-          const container = this.agentSprites.get(agent.id);
-          if (container) {
-            this.hideThoughtBubble(agent.id);
-            if (agent.currentThought) this.showThoughtBubble(agent, container);
+        const container = this.agentSprites.get(agent.id);
+        if (container) {
+          // Throttle bubble updates to avoid excessive recreation during streaming
+          const lastUpdate = this.thoughtBubbleLastUpdate.get(agent.id) ?? 0;
+          const now = Date.now();
+          if (now - lastUpdate < 500 && agent.status !== "idle") continue;
+          this.thoughtBubbleLastUpdate.set(agent.id, now);
+
+          this.hideThoughtBubble(agent.id);
+          // Auto-show thought bubbles for non-idle agents
+          if (agent.currentThought && agent.status !== "idle") {
+            this.showThoughtBubble(agent, container);
           }
         }
       }
@@ -2126,9 +2134,11 @@ export class OfficeScene extends Phaser.Scene {
                 ? 0xeab308
                 : agent.status === "waiting-input"
                   ? 0xf97316
-                  : agent.status === "stuck"
-                    ? 0xef4444
-                    : 0x7f8c8d;
+                  : agent.status === "slow"
+                    ? 0xeab308
+                    : agent.status === "stuck"
+                      ? 0xef4444
+                      : 0x7f8c8d;
     const statusGfx = this.add.graphics();
     statusGfx.setName("statusDot");
     statusGfx.fillStyle(0x000000, 0.3);
@@ -2216,28 +2226,51 @@ export class OfficeScene extends Phaser.Scene {
     const bubble = this.add.container(px, py - 44);
     bubble.setDepth(25);
 
-    const maxW = 180;
-    const text = this.add.text(0, 0, agent.currentThought, {
+    // Strip emojis and non-ASCII characters that Phaser can't render, then truncate
+    const rawThought = agent.currentThought
+      .replace(/[\u{1F000}-\u{1FFFF}]/gu, "")  // supplementary symbols
+      .replace(/[\u{2600}-\u{27BF}]/gu, "")     // misc symbols
+      .replace(/[\u{FE00}-\u{FE0F}]/gu, "")     // variation selectors
+      .replace(/[\u{200D}]/gu, "")               // zero-width joiner
+      .replace(/^\s+/, "")
+      .trim();
+    if (!rawThought) return;
+    const displayThought = rawThought.length > 45 ? rawThought.slice(0, 42) + "..." : rawThought;
+
+    const maxW = 140;
+    const padX = 8;
+    const padY = 6;
+
+    // Create text with a fixed wordWrap width so Phaser wraps correctly
+    const wrapWidth = maxW - padX * 2;
+    const text = this.add.text(0, 0, displayThought, {
       fontSize: "9px",
       fontFamily: '"SF Pro", "Segoe UI", system-ui, sans-serif',
       color: "#1a1a2e",
-      wordWrap: { width: maxW - 20 },
+      wordWrap: { width: wrapWidth, useAdvancedWrap: true },
       align: "center",
       lineSpacing: 2,
       resolution: window.devicePixelRatio,
+      fixedWidth: wrapWidth,
     });
-    text.setOrigin(0.5, 1);
 
-    const tw = Math.min(text.width + 20, maxW);
-    const th = text.height + 14;
+    // Use fixedWidth for consistent sizing; height from actual render
+    const tw = wrapWidth + padX * 2;
+    const th = text.height + padY * 2;
+
+    // Position text centered within the bubble
+    text.setPosition(-tw / 2 + padX, -th + padY);
 
     const bg = this.add.graphics();
+    // Drop shadow
     bg.fillStyle(0x000000, 0.12);
     bg.fillRoundedRect(-tw / 2 + 2, -th + 2, tw, th, 8);
+    // White bubble
     bg.fillStyle(0xffffff, 0.96);
     bg.fillRoundedRect(-tw / 2, -th, tw, th, 8);
     bg.lineStyle(1.5, 0xcccccc, 0.8);
     bg.strokeRoundedRect(-tw / 2, -th, tw, th, 8);
+    // Tail dots
     bg.fillStyle(0xffffff, 0.96);
     bg.fillCircle(0, 4, 4);
     bg.fillCircle(-3, 10, 2.5);
@@ -2310,9 +2343,11 @@ export class OfficeScene extends Phaser.Scene {
                 ? 0xeab308
                 : agent.status === "waiting-input"
                   ? 0xf97316
-                  : agent.status === "stuck"
-                    ? 0xef4444
-                    : 0x7f8c8d;
+                  : agent.status === "slow"
+                    ? 0xeab308
+                    : agent.status === "stuck"
+                      ? 0xef4444
+                      : 0x7f8c8d;
     const statusGfx = this.add.graphics();
     statusGfx.setName("statusDot");
     statusGfx.fillStyle(0x000000, 0.3);
@@ -2384,6 +2419,11 @@ export class OfficeScene extends Phaser.Scene {
         if (agent.status === "idle") {
           this.startIdleBob(container, targetY);
           this.scheduleWalk(agent.id);
+          this.hideThoughtBubble(agent.id);
+        } else if (agent.currentThought) {
+          // Show thought bubble when agent arrives at desk and is working
+          this.hideThoughtBubble(agent.id);
+          this.showThoughtBubble(agent, container);
         }
         if (agent.status === "collaborating" && agent.collaboratingWith) {
           this.drawCollaborationLine(agent.id, agent.collaboratingWith);

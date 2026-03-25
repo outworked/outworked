@@ -46,7 +46,9 @@ export default function UpdateBanner() {
         setDismissed(false);
       }),
       updater.onError((message) => {
-        setState({ status: "error", message });
+        setState((prev) =>
+          prev.status === "idle" ? prev : { status: "error", message },
+        );
       }),
     ];
 
@@ -132,7 +134,7 @@ export default function UpdateBanner() {
             onClick={() => setDismissed(true)}
             className="px-1.5 py-0.5 text-red-400 hover:text-red-200 text-[9px] shrink-0"
           >
-            Dismiss
+            X
           </button>
         </div>
       )}

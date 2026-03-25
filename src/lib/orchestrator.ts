@@ -40,6 +40,7 @@ export interface OrchestrationResult {
   plan: string;
   newAgents: NewAgentSpec[];
   workingDirectory: string;
+  directAnswer?: string;
   cost?: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -62,7 +63,16 @@ You will also be given:
 Use the file tree for orientation and the file contents to understand what already exists — this is critical for making informed routing decisions. For example, if the project already has a package.json, you know the tech stack; if it has certain source files, you can assign tasks that build on them rather than starting from scratch.
 
 
-RESPOND in this exact JSON format and nothing else:
+IMPORTANT: If the instruction is a simple question, informational request, or something you can answer directly from the file tree and file contents provided (e.g. "how do I run this?", "what does X do?", "explain Y", "what tech stack is this?"), respond with a direct answer instead of delegating. Use this format:
+{
+  "directAnswer": "Your helpful answer here. You can use markdown formatting.",
+  "plan": "Answered directly",
+  "workingDirectory": "",
+  "newAgents": [],
+  "assignments": []
+}
+
+For implementation tasks (writing code, creating files, building features, fixing bugs), delegate to employees. RESPOND in this exact JSON format and nothing else:
 {
   "plan": "Brief summary of the plan",
   "workingDirectory": "short-slug",
@@ -309,6 +319,22 @@ export async function routeTasks(
         },
       );
 
+      // If the boss answered directly, return immediately without needing a working directory.
+      // The LLM may use various keys: directAnswer, response, answer, message, reply, etc.
+      const directText = (parsed.directAnswer ?? parsed.response ?? parsed.answer ?? parsed.message ?? parsed.reply) as string | undefined;
+      if (directText && assignments.length === 0) {
+        return {
+          assignments: [],
+          plan: (parsed.plan as string) || "Answered directly",
+          newAgents: [],
+          workingDirectory: "",
+          directAnswer: directText,
+          cost: routerCost,
+          inputTokens: routerInputTokens,
+          outputTokens: routerOutputTokens,
+        };
+      }
+
       // Ensure the working directory exists
       const workDir = sanitizeSlug(parsed.workingDirectory || "project");
       await ensureWorkingDirectory(workDir);
@@ -334,25 +360,16 @@ export async function routeTasks(
     }
   }
 
-  // All attempts failed — fallback: assign the whole thing to the first agent
-  console.warn("[orchestrator] All route attempts failed. Using fallback.");
-  const fallbackDir = "project";
-  await ensureWorkingDirectory(fallbackDir);
+  // All attempts failed — the LLM likely replied in plain text (e.g. answering
+  // a simple question directly instead of producing JSON).  Treat the raw reply
+  // as a direct answer so the boss can respond without delegating.
+  console.warn("[orchestrator] All route attempts failed. Using raw reply as direct answer.");
   return {
-    plan: "Could not parse routing — assigning to first available employee.",
-    assignments:
-      agents.length > 0
-        ? [
-            {
-              agentId: agents[0].id,
-              agentName: agents[0].name,
-              task: instruction,
-              subtasks: [instruction],
-            },
-          ]
-        : [],
+    plan: "Answered directly",
+    assignments: [],
     newAgents: [],
-    workingDirectory: fallbackDir,
+    workingDirectory: "",
+    directAnswer: lastRawReply || "I wasn't able to process that request. Could you try rephrasing?",
     cost: routerCost,
     inputTokens: routerInputTokens,
     outputTokens: routerOutputTokens,
@@ -577,6 +594,10 @@ export async function executeTask(
     args: Record<string, unknown>,
   ) => Promise<string | null>,
   colleagues?: { name: string; role: string }[],
+  onToolCall?: (call: { name: string; args: Record<string, unknown> }) => void,
+  onClaudeCodeEvent?: (event: { type: string; toolName?: string; toolInput?: Record<string, unknown>; text?: string }) => void,
+  onSlow?: (agentName: string) => void,
+  onStuck?: (agentName: string) => void,
 ): Promise<{
   agent: Agent;
   reply: string;
@@ -584,6 +605,52 @@ export async function executeTask(
   inputTokens?: number;
   outputTokens?: number;
 }> {
+  // Two-tier stuck detection:
+  // - "slow" at 3 minutes: soft warning, no abort
+  // - "stuck" at 5 minutes: enables abort
+  const SLOW_TIMEOUT_MS = 180_000;
+  const STUCK_TIMEOUT_MS = 300_000;
+  let lastActivity = Date.now();
+  let slowFired = false;
+  let stuckFired = false;
+
+  const stuckCheckInterval = (onSlow || onStuck)
+    ? setInterval(() => {
+        const elapsed = Date.now() - lastActivity;
+        if (!slowFired && elapsed > SLOW_TIMEOUT_MS) {
+          slowFired = true;
+          onSlow?.(agent.name);
+        }
+        if (!stuckFired && elapsed > STUCK_TIMEOUT_MS) {
+          stuckFired = true;
+          onStuck?.(agent.name);
+        }
+      }, 15_000)
+    : null;
+
+  // Wrap callbacks to track activity timestamps
+  const resetActivity = () => {
+    lastActivity = Date.now();
+    slowFired = false;
+    stuckFired = false;
+  };
+  const wrappedOnThought = (text: string) => {
+    resetActivity();
+    onThought(text);
+  };
+  const wrappedOnToolCall = onToolCall
+    ? (call: { name: string; args: Record<string, unknown> }) => {
+        resetActivity();
+        onToolCall(call);
+      }
+    : undefined;
+  const wrappedOnClaudeCodeEvent = onClaudeCodeEvent
+    ? (event: { type: string; toolName?: string; toolInput?: Record<string, unknown>; text?: string }) => {
+        resetActivity();
+        onClaudeCodeEvent(event);
+      }
+    : undefined;
+
   // Build a strong system-level directive so agents respect the working directory
   const extraSystemPrompt = workingDirectory
     ? `\n\n## IMPORTANT — Project Directory\nThis project's root is "${workingDirectory}/". You MUST:\n- Prefix EVERY file path with "${workingDirectory}/" (e.g. "${workingDirectory}/src/index.js", NOT "src/index.js")\n- Pass cwd: "${workingDirectory}" to every run_command call\n- NEVER write files to paths outside "${workingDirectory}/"\nViolating this will break the project structure.`
@@ -608,38 +675,59 @@ export async function executeTask(
     currentThought: "Working on task...",
   };
 
-  const result = await sendMessageWithCost(
-    updatedAgent,
-    userMsg.content,
-    keys,
-    onThought,
-    signal,
-    { skills, extraSystemPrompt, customToolExecutor, colleagues },
-  );
+  try {
+    const result = await sendMessageWithCost(
+      updatedAgent,
+      userMsg.content,
+      keys,
+      wrappedOnThought,
+      signal,
+      {
+        skills,
+        extraSystemPrompt,
+        customToolExecutor,
+        colleagues,
+        onToolCall: wrappedOnToolCall,
+        onClaudeCodeEvent: wrappedOnClaudeCodeEvent,
+      },
+    );
 
-  const assistantMsg: Message = {
-    role: "assistant",
-    content: result.text,
-    timestamp: Date.now(),
-  };
+    const assistantMsg: Message = {
+      role: "assistant",
+      content: result.text,
+      timestamp: Date.now(),
+    };
 
-  return {
-    agent: {
+    return {
+      agent: {
+        ...updatedAgent,
+        // Only keep the latest exchange in local history — the full
+        // conversation lives in the Claude Code session.
+        history: agent.sessionId
+          ? [userMsg, assistantMsg]
+          : [...updatedAgent.history, assistantMsg],
+        status: "idle",
+        currentThought:
+          result.text.slice(0, 80) + (result.text.length > 80 ? "..." : ""),
+      },
+      reply: result.text,
+      cost: result.cost,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+    };
+  } catch (err) {
+    // Attach an agent snapshot with idle status so callers can recover
+    // the agent state without manually resetting it.
+    const error = err instanceof Error ? err : new Error(String(err));
+    (error as Error & { agent?: Agent }).agent = {
       ...updatedAgent,
-      // Only keep the latest exchange in local history — the full
-      // conversation lives in the Claude Code session.
-      history: agent.sessionId
-        ? [userMsg, assistantMsg]
-        : [...updatedAgent.history, assistantMsg],
       status: "idle",
-      currentThought:
-        result.text.slice(0, 80) + (result.text.length > 80 ? "..." : ""),
-    },
-    reply: result.text,
-    cost: result.cost,
-    inputTokens: result.inputTokens,
-    outputTokens: result.outputTokens,
-  };
+      currentThought: "",
+    };
+    throw error;
+  } finally {
+    if (stuckCheckInterval) clearInterval(stuckCheckInterval);
+  }
 }
 
 /**
@@ -703,7 +791,7 @@ export interface AgentTeamCallbacks {
   }) => void;
   onAgentStatus?: (
     agentName: string,
-    status: "working" | "done" | "waiting-input" | "waiting-approval" | "stuck",
+    status: "working" | "done" | "waiting-input" | "waiting-approval" | "slow" | "stuck",
     thought?: string,
   ) => void;
   /** Called when the boss delegates to an agent name not in the roster — allows dynamic creation */
@@ -773,7 +861,7 @@ export async function routeTasksViaClaudeCode(
 
   const hasTeam = agentNames.length > 0;
 
-  const systemPrompt = `You are the Boss. Delegate ALL tasks to employees via the Agent tool. NEVER do implementation yourself.
+  const systemPrompt = `You are the Boss. You manage a team of employees and coordinate their work.
 
 ## Team
 ${agentRoster || "(No employees yet)"}
@@ -781,7 +869,8 @@ ${agentRoster || "(No employees yet)"}
 ## Rules
 ${
   hasTeam
-    ? `- Delegate ALL work. NEVER write code, edit files, or run commands yourself.
+    ? `- For simple questions, informational requests, or quick answers (e.g. "how do I run this?", "what does X do?", "explain Y"), respond directly yourself. You have full context of the project workspace and can read files to answer questions.
+- For implementation tasks (writing code, creating files, building features, fixing bugs), delegate to the appropriate employee(s) via the Agent tool. NEVER do implementation yourself.
 - Break complex tasks into subtasks and delegate to the right employee.
 - Delegate to multiple agents in parallel when subtasks are independent.
 - After delegations complete, provide a brief summary.`
@@ -813,15 +902,22 @@ ${
   );
 
   let fullText = "";
-  // Track time of last meaningful event per agent to detect stuck agents
+  // Two-tier stuck detection per agent
   const agentLastActivity = new Map<string, number>();
-  const STUCK_TIMEOUT_MS = 120_000; // 2 minutes of silence = stuck
+  const agentSlowFired = new Set<string>();
+  const SLOW_TIMEOUT_MS = 180_000; // 3 minutes = soft warning
+  const STUCK_TIMEOUT_MS = 300_000; // 5 minutes = likely stuck
 
   const stuckCheckInterval = setInterval(() => {
     const now = Date.now();
     for (const [name, ts] of agentLastActivity) {
-      if (now - ts > STUCK_TIMEOUT_MS) {
-        callbacks.onAgentStatus?.(name, "stuck", "No progress for 2 minutes");
+      const elapsed = now - ts;
+      if (!agentSlowFired.has(name) && elapsed > SLOW_TIMEOUT_MS) {
+        agentSlowFired.add(name);
+        callbacks.onAgentStatus?.(name, "slow", "No progress for 3 minutes");
+      }
+      if (elapsed > STUCK_TIMEOUT_MS) {
+        callbacks.onAgentStatus?.(name, "stuck", "No progress for 5 minutes");
       }
     }
   }, 15_000);
@@ -842,8 +938,10 @@ ${
           0,
           80,
         );
-        if (agentName)
+        if (agentName) {
           agentLastActivity.set(agentName.toLowerCase(), Date.now());
+          agentSlowFired.delete(agentName.toLowerCase());
+        }
         if (
           agentName &&
           !knownNames.has(agentName.toLowerCase()) &&

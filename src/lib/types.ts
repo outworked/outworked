@@ -72,6 +72,7 @@ export type AgentStatus =
   | "collaborating"
   | "waiting-input"
   | "waiting-approval"
+  | "slow"
   | "stuck"
   | "background";
 
@@ -155,6 +156,10 @@ export interface Agent {
   currentSessionId?: string; // active Outworked session ID (for persistence)
   collaboratingWith?: string; // id of agent being consulted (ephemeral, drives walk animation)
   autoCreated?: boolean; // true if created automatically by the orchestrator
+  // Ephemeral streaming state — allows viewing an agent's live work from any tab
+  liveStreamText?: string; // partial response text being generated
+  liveToolCalls?: { name: string; args: string; timestamp: number }[]; // tool calls in progress
+  liveThinking?: string; // current thinking preview
 }
 
 export interface AgentMessage {

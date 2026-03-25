@@ -55,8 +55,11 @@ function getClaudeExecutablePath() {
   return undefined; // let the SDK try its default (will fail inside asar)
 }
 
-// Active sessions: reqId → { abortController, done: boolean }
+// Active sessions: reqId → { abortController, done: boolean, heartbeatInterval }
 const activeSessions = new Map();
+
+// Heartbeat interval (ms) — renderer uses 2× this as the dead-session threshold
+const HEARTBEAT_INTERVAL_MS = 15_000;
 
 // Pending permission requests: permId → { resolve }
 // Used by canUseTool to wait for user approval from the renderer.
@@ -87,7 +90,15 @@ function resolvePermission(permId, allow) {
 async function startSession(reqId, options, callbacks) {
   const query = await getQuery();
   const abortController = new AbortController();
-  activeSessions.set(reqId, { abortController, done: false });
+
+  // Periodic heartbeat so the renderer can detect silently dead sessions
+  const heartbeatInterval = setInterval(() => {
+    if (callbacks.onHeartbeat) {
+      callbacks.onHeartbeat(reqId);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  activeSessions.set(reqId, { abortController, done: false, heartbeatInterval });
 
   // Handle timeout via AbortController
   let timeoutId = null;
@@ -268,6 +279,7 @@ async function startSession(reqId, options, callbacks) {
     }
 
     if (timeoutId) clearTimeout(timeoutId);
+    clearInterval(heartbeatInterval);
     activeSessions.delete(reqId);
 
     const isError = lastResult?.is_error || false;
@@ -288,6 +300,7 @@ async function startSession(reqId, options, callbacks) {
     return lastResult;
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
+    clearInterval(heartbeatInterval);
     activeSessions.delete(reqId);
 
     // AbortError means user cancelled — treat as code 0 with no error
@@ -311,6 +324,7 @@ function abortSession(reqId) {
   if (session && !session.done) {
     session.done = true;
     session.abortController.abort();
+    if (session.heartbeatInterval) clearInterval(session.heartbeatInterval);
     activeSessions.delete(reqId);
     return true;
   }
@@ -331,6 +345,7 @@ function abortAll() {
   for (const [reqId, session] of activeSessions) {
     session.done = true;
     session.abortController.abort();
+    if (session.heartbeatInterval) clearInterval(session.heartbeatInterval);
   }
   activeSessions.clear();
 }

@@ -98,6 +98,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.on("claude-code:done", listener);
       return () => ipcRenderer.removeListener("claude-code:done", listener);
     },
+    onHeartbeat: (cb) => {
+      const listener = (_event, reqId) => cb(reqId);
+      ipcRenderer.on("claude-code:heartbeat", listener);
+      return () =>
+        ipcRenderer.removeListener("claude-code:heartbeat", listener);
+    },
     version: () => ipcRenderer.invoke("claude-code:version"),
     authStatus: () => ipcRenderer.invoke("claude-code:authStatus"),
     listAgents: (cwd) => ipcRenderer.invoke("claude-code:listAgents", cwd),

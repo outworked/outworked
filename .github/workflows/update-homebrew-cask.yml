@@ -1,0 +1,47 @@
+name: Update Homebrew Cask
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-cask:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download DMG and compute SHA256
+        id: sha
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          curl -fSL -o Outworked.dmg \
+            "https://github.com/outworked/outworked/releases/download/v${VERSION}/Outworked-${VERSION}-arm64.dmg"
+          SHA=$(sha256sum Outworked.dmg | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: outworked/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update cask formula
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          SHA="${{ steps.sha.outputs.sha256 }}"
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/outworked.rb
+          sed -i "s/sha256 \".*\"/sha256 \"${SHA}\"/" Casks/outworked.rb
+
+      - name: Commit and push
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/outworked.rb
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "Update outworked to ${VERSION}"
+          git push

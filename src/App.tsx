@@ -88,6 +88,9 @@ const EPHEMERAL_KEYS = new Set<keyof Agent>([
   "sessionId",
   "collaboratingWith",
   "position",
+  "liveStreamText",
+  "liveToolCalls",
+  "liveThinking",
 ]);
 
 /**
@@ -110,6 +113,9 @@ function mergeRuntimeState(prev: Agent[], fresh: Agent[]): Agent[] {
       currentSessionId: p.currentSessionId,
       sessionId: p.sessionId,
       collaboratingWith: p.collaboratingWith,
+      liveStreamText: p.liveStreamText,
+      liveToolCalls: p.liveToolCalls,
+      liveThinking: p.liveThinking,
     };
   });
   // Keep any prev agents not yet on disk (optimistic adds awaiting file write)
@@ -765,7 +771,7 @@ export default function App() {
           <MusicPlayer />
         </div>
         <div className="px-3 py-2 border-t border-gray-800 flex flex-col gap-1.5">
-          <button
+          {/* <button
             onClick={() => {
               const next = !agentTeamsEnabled;
               setAgentTeamsEnabled(next);
@@ -774,7 +780,7 @@ export default function App() {
             className={`w-full btn-pixel text-[10px] ${agentTeamsEnabled ? "bg-indigo-700 hover:bg-indigo-600 text-indigo-50" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
           >
             {agentTeamsEnabled ? "👥 Teams ON" : "👤 Teams OFF"}
-          </button>
+          </button> */}
           <button
             onClick={() => {
               const next = !permissionPromptsEnabled;
@@ -903,9 +909,10 @@ export default function App() {
             onDismiss={() => setLatestToast(null)}
           />
           <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-slate-950/90 backdrop-blur-sm border-t border-slate-700 flex flex-col gap-1">
-            {/* Attention-needed agents (stuck / waiting) */}
+            {/* Attention-needed agents (slow / stuck / waiting) */}
             {agents.filter(
               (a) =>
+                a.status === "slow" ||
                 a.status === "stuck" ||
                 a.status === "waiting-input" ||
                 a.status === "waiting-approval",
@@ -914,6 +921,7 @@ export default function App() {
                 {agents
                   .filter(
                     (a) =>
+                      a.status === "slow" ||
                       a.status === "stuck" ||
                       a.status === "waiting-input" ||
                       a.status === "waiting-approval",
@@ -925,86 +933,101 @@ export default function App() {
                       className={`flex items-center gap-1.5 shrink-0 px-2 py-0.5 rounded text-[10px] font-pixel border transition-colors ${
                         a.status === "stuck"
                           ? "bg-red-900/40 border-red-700/50 text-red-300 animate-pulse hover:bg-red-900/60"
-                          : a.status === "waiting-approval"
-                            ? "bg-amber-900/40 border-amber-700/50 text-amber-300 animate-pulse hover:bg-amber-900/60"
-                            : "bg-orange-900/40 border-orange-700/50 text-orange-300 animate-pulse hover:bg-orange-900/60"
+                          : a.status === "slow"
+                            ? "bg-yellow-900/40 border-yellow-700/50 text-yellow-300 hover:bg-yellow-900/60"
+                            : a.status === "waiting-approval"
+                              ? "bg-amber-900/40 border-amber-700/50 text-amber-300 animate-pulse hover:bg-amber-900/60"
+                              : "bg-orange-900/40 border-orange-700/50 text-orange-300 animate-pulse hover:bg-orange-900/60"
                       }`}
                     >
                       <span>
                         {a.status === "stuck"
                           ? "⚠"
-                          : a.status === "waiting-approval"
-                            ? "🔒"
-                            : "⏸"}
+                          : a.status === "slow"
+                            ? "🐢"
+                            : a.status === "waiting-approval"
+                              ? "🔒"
+                              : "⏸"}
                       </span>
                       <span style={{ color: a.color }}>{a.name}</span>
                       <span className="text-[9px] opacity-80">
                         {a.status === "stuck"
                           ? "Stuck"
-                          : a.status === "waiting-approval"
-                            ? "Needs approval"
-                            : "Needs input"}
+                          : a.status === "slow"
+                            ? "Slow"
+                            : a.status === "waiting-approval"
+                              ? "Needs approval"
+                              : "Needs input"}
                       </span>
                     </button>
                   ))}
               </div>
             )}
-            {/* Active agents */}
-            <div className="flex gap-4 overflow-x-auto">
-              {agents
-                .filter(
-                  (a) =>
-                    a.status !== "idle" &&
-                    a.status !== "stuck" &&
-                    a.status !== "waiting-input" &&
-                    a.status !== "waiting-approval",
-                )
-                .map((a) => (
-                  <button
-                    key={a.id}
-                    onClick={() => handleAgentClick(a)}
-                    className="flex items-center gap-1.5 shrink-0 group hover:bg-slate-800/50 rounded px-1.5 py-0.5 transition-colors"
-                  >
-                    <span className="relative flex h-2 w-2">
+            {/* Active agents ticker */}
+            <div className="overflow-hidden w-full">
+              <div className="flex gap-4 w-max animate-marquee-agents">
+                {/* Render items twice for seamless marquee loop */}
+                {[0, 1].map((pass) => {
+                  const active = agents.filter(
+                    (a) =>
+                      a.status !== "idle" &&
+                      a.status !== "slow" &&
+                      a.status !== "stuck" &&
+                      a.status !== "waiting-input" &&
+                      a.status !== "waiting-approval",
+                  );
+                  if (active.length === 0 && pass === 0) {
+                    return (
                       <span
-                        className={`${a.status === "background" ? "" : "animate-ping"} absolute inline-flex h-full w-full rounded-full opacity-75`}
-                        style={{
-                          backgroundColor:
-                            a.status === "background" ? "#6366f1" : a.color,
-                        }}
-                      />
-                      <span
-                        className="relative inline-flex rounded-full h-2 w-2"
-                        style={{
-                          backgroundColor:
-                            a.status === "background" ? "#6366f1" : a.color,
-                        }}
-                      />
-                    </span>
-                    <span className="text-[10px] font-pixel text-slate-300">
-                      {a.status === "background" && (
-                        <span className="text-indigo-400 mr-1">[BG]</span>
-                      )}
-                      <span style={{ color: a.color }}>{a.name}</span>
-                      {a.currentThought && (
-                        <>
-                          <span className="text-slate-600 mx-1">·</span>
-                          <span className="text-slate-400">
-                            {a.currentThought.slice(0, 60)}
-                            {a.currentThought.length > 60 ? "…" : ""}
-                          </span>
-                        </>
-                      )}
-                    </span>
-                  </button>
-                ))}
-              {agents.every(
-                (a) => a.status === "idle" || !a.currentThought,
-              ) && (
-                <span className="text-[10px] font-pixel text-slate-400">
-                  Click an employee to chat!
-                </span>
-              )}
+                        key="empty"
+                        className="text-[10px] font-pixel text-slate-400 shrink-0"
+                      >
+                        Click an employee to chat!
+                      </span>
+                    );
+                  }
+                  if (active.length === 0) return null;
+                  return active.map((a) => (
+                    <button
+                      key={`${pass}-${a.id}`}
+                      onClick={() => handleAgentClick(a)}
+                      className="flex items-center gap-1.5 shrink-0 group hover:bg-slate-800/50 rounded px-1.5 py-0.5 transition-colors"
+                    >
+                      <span className="relative flex h-2 w-2">
+                        <span
+                          className={`${a.status === "background" ? "" : "animate-ping"} absolute inline-flex h-full w-full rounded-full opacity-75`}
+                          style={{
+                            backgroundColor:
+                              a.status === "background" ? "#6366f1" : a.color,
+                          }}
+                        />
+                        <span
+                          className="relative inline-flex rounded-full h-2 w-2"
+                          style={{
+                            backgroundColor:
+                              a.status === "background" ? "#6366f1" : a.color,
+                          }}
+                        />
+                      </span>
+                      <span className="text-[10px] font-pixel text-slate-300 whitespace-nowrap">
+                        {a.status === "background" && (
+                          <span className="text-indigo-400 mr-1">[BG]</span>
+                        )}
+                        <span style={{ color: a.color }}>{a.name}</span>
+                        {a.currentThought && (
+                          <>
+                            <span className="text-slate-600 mx-1">·</span>
+                            <span className="text-slate-400">
+                              {a.currentThought.slice(0, 60)}
+                              {a.currentThought.length > 60 ? "..." : ""}
+                            </span>
+                          </>
+                        )}
+                      </span>
+                    </button>
+                  ));
+                })}
+              </div>
             </div>
           </div>
         </main>
@@ -1061,24 +1084,27 @@ export default function App() {
             )}
           </div>
           <div className="flex-1 overflow-hidden relative">
-            {rightPanel !== "terminal" &&
-              rightPanel !== "workspace" &&
-              rightPanel !== "git" &&
-              (rightPanel === "chat" ? (
-                <ChatWindow
-                  agent={selectedAgent}
-                  agents={agents}
-                  skills={skills}
-                  onUpdateAgent={updateAgent}
-                  onAddAgent={handleAddDynamicAgent}
-                  agentTeamsEnabled={agentTeamsEnabled}
-                  onOrchestrationDone={handleOrchestrationDone}
-                  onPermissionNotification={handlePermissionNotification}
-                  debugMode={debugMode}
-                  backgroundTasks={backgroundTasks}
-                  onStartBackgroundTask={handleStartBackgroundTask}
-                />
-              ) : rightPanel === "editor" && selectedAgent ? (
+            {/* ChatWindow — always mounted to preserve streaming state; hidden when not active */}
+            <div
+              className={`absolute inset-0 ${rightPanel === "chat" ? "" : "invisible pointer-events-none"}`}
+            >
+              <ChatWindow
+                agent={selectedAgent}
+                agents={agents}
+                skills={skills}
+                onUpdateAgent={updateAgent}
+                onAddAgent={handleAddDynamicAgent}
+                agentTeamsEnabled={agentTeamsEnabled}
+                onOrchestrationDone={handleOrchestrationDone}
+                onPermissionNotification={handlePermissionNotification}
+                debugMode={debugMode}
+                backgroundTasks={backgroundTasks}
+                onStartBackgroundTask={handleStartBackgroundTask}
+              />
+            </div>
+            {/* Editor and Tasks — conditionally rendered (no persistent state to preserve) */}
+            {rightPanel === "editor" && selectedAgent && (
+              <div className="absolute inset-0">
                 <AgentEditor
                   agent={selectedAgent}
                   workspaceDir={workspaceDir || undefined}
@@ -1086,9 +1112,13 @@ export default function App() {
                   onDelete={handleDeleteAgent}
                   onClose={() => setRightPanel("chat")}
                 />
-              ) : rightPanel === "tasks" ? (
+              </div>
+            )}
+            {rightPanel === "tasks" && (
+              <div className="absolute inset-0">
                 <AgentTasks agent={selectedAgent} onUpdateAgent={updateAgent} />
-              ) : null)}
+              </div>
+            )}
             {/* Workspace panel — always mounted to preserve watcher; hidden when not active */}
             <div
               className={`absolute inset-0 ${rightPanel === "workspace" ? "" : "invisible pointer-events-none"}`}

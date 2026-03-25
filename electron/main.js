@@ -399,6 +399,11 @@ function setupShellIPC() {
               mainWindow.webContents.send("claude-code:event", id, message);
             }
           },
+          onHeartbeat: (id) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("claude-code:heartbeat", id);
+            }
+          },
           onDone: (id, code, error) => {
             syncCaffeinate();
             if (mainWindow && !mainWindow.isDestroyed()) {
@@ -449,6 +454,11 @@ function setupShellIPC() {
       onMessage: (id, message) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send("claude-code:event", id, message);
+        }
+      },
+      onHeartbeat: (id) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("claude-code:heartbeat", id);
         }
       },
       onStderr: (id, data) => {
@@ -2083,6 +2093,7 @@ function setupSessionIPC() {
 function setupAutoUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  // autoUpdater.allowPrerelease = true;
   // autoUpdater.forceDevUpdateConfig = !app.isPackaged;
 
   autoUpdater.on("update-available", (info) => {
@@ -2184,6 +2195,20 @@ function createWindow() {
       shell.openExternal(url);
     }
     return { action: "deny" };
+  });
+
+  // When the renderer reloads (Cmd-R, navigation, HMR full reload), abort all
+  // active SDK sessions. Without this, the renderer loses its IPC listeners
+  // and in-flight sessions become orphaned — agents appear "working" forever.
+  mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace) => {
+    if (sdkBridge.hasActiveSessions()) {
+      verbose &&
+        console.log(
+          "[main] renderer navigating — aborting orphaned SDK sessions",
+        );
+      sdkBridge.abortAll();
+      syncCaffeinate();
+    }
   });
 
   mainWindow.on("closed", () => {

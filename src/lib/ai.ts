@@ -303,9 +303,24 @@ async function callClaudeCodeAdvanced(
       });
     },
     onEvent: (event) => {
+      // Extract text from assistant messages for thinking previews
+      let eventText: string | undefined;
+      if (event.type === "result" && typeof event.result === "string") {
+        eventText = event.result;
+      } else if (event.type === "assistant" && event.message?.content) {
+        const content = event.message.content;
+        if (typeof content === "string") {
+          eventText = content;
+        } else if (Array.isArray(content)) {
+          eventText = content
+            .filter((b) => b.type === "text" && b.text)
+            .map((b) => b.text)
+            .join("");
+        }
+      }
       onClaudeCodeEvent?.({
         type: event.type,
-        text: typeof event.result === "string" ? event.result : undefined,
+        text: eventText,
       });
     },
     onStderr: onStderr,
