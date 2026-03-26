@@ -247,7 +247,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("skill-runtime:status", runtime),
 
     // Channel manager (lifecycle + messaging)
+    channelTypes: () => ipcRenderer.invoke("channel:types"),
     channelRegister: (config) => ipcRenderer.invoke("channel:register", config),
+    channelRemove: (id) => ipcRenderer.invoke("channel:remove", id),
+    channelUpdate: (data) => ipcRenderer.invoke("channel:update", data),
     channelConnect: (id) => ipcRenderer.invoke("channel:connect", id),
     channelDisconnect: (id) => ipcRenderer.invoke("channel:disconnect", id),
     channelSend: (channelId, conversationId, content) =>

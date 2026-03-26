@@ -35,6 +35,15 @@ import { getSetting } from "../lib/settings";
 import PermissionModal from "./PermissionModal";
 import MarkdownMessage from "./MarkdownMessage";
 
+/** Extract the last meaningful snippet from cumulative streaming text for thought bubbles. */
+function tailThought(text: string, maxLen = 70): string {
+  // Grab the last non-empty line (streaming text accumulates with newlines)
+  const lines = text.split("\n").filter((l) => l.trim());
+  const last = lines.length > 0 ? lines[lines.length - 1].trim() : text.trim();
+  if (last.length <= maxLen) return last;
+  return "..." + last.slice(last.length - maxLen + 3);
+}
+
 export interface OrchestrationDoneEvent {
   success: number;
   failed: number;
@@ -513,7 +522,7 @@ export default function ChatWindow({
         ...(bossSessionId && { sessionId: bossSessionId }),
         history: [...updatedWithUser.history, assistantMsg],
         status: "idle",
-        currentThought: reply.slice(0, 80) + (reply.length > 80 ? "..." : ""),
+        currentThought: tailThought(reply, 80),
       };
       onUpdateAgent(finalAgent);
       // Persist session to disk
@@ -634,8 +643,7 @@ export default function ChatWindow({
               onUpdateAgent({
                 ...target,
                 status: "working",
-                currentThought:
-                  partial.slice(0, 80) + (partial.length > 80 ? "..." : ""),
+                currentThought: tailThought(partial, 80),
               }),
             abortRef.current?.signal,
             { useTools: true, skills },
@@ -832,7 +840,7 @@ export default function ChatWindow({
             onUpdateAgent({
               ...emp,
               liveStreamText: fullText,
-              currentThought: delta.slice(0, 70),
+              currentThought: tailThought(delta),
             });
           }
         },
@@ -1507,7 +1515,7 @@ export default function ChatWindow({
                 onUpdateAgent({
                   ...currentAgent,
                   status: "working",
-                  currentThought: partial.slice(0, 70),
+                  currentThought: tailThought(partial),
                   liveStreamText: partial,
                 }),
               abortRef.current?.signal,
@@ -1844,8 +1852,7 @@ export default function ChatWindow({
           onUpdateAgent({
             ...agentState,
             status: "speaking",
-            currentThought:
-              partial.slice(0, 80) + (partial.length > 80 ? "..." : ""),
+            currentThought: tailThought(partial, 80),
           });
         },
         abortRef.current!.signal,
@@ -1994,8 +2001,7 @@ export default function ChatWindow({
             onUpdateAgent({
               ...agentState,
               status: "speaking",
-              currentThought:
-                partial.slice(0, 80) + (partial.length > 80 ? "..." : ""),
+              currentThought: tailThought(partial, 80),
             });
           },
           abortRef.current!.signal,
@@ -2075,7 +2081,7 @@ export default function ChatWindow({
           onUpdateAgent({
             ...updatedWithUser,
             status: "background" as AgentStatus,
-            currentThought: `🔄 ${partial.slice(0, 60)}${partial.length > 60 ? "…" : ""}`,
+            currentThought: `🔄 ${tailThought(partial, 60)}`,
           });
         },
         undefined, // no abort signal for background tasks
@@ -2110,7 +2116,7 @@ export default function ChatWindow({
         ...updatedWithUser,
         history: [...updatedWithUser.history, assistantMsg],
         status: "idle",
-        currentThought: reply.slice(0, 80) + (reply.length > 80 ? "..." : ""),
+        currentThought: tailThought(reply, 80),
       };
       return { reply, agent: finalAgent };
     };

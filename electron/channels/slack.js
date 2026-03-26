@@ -12,6 +12,42 @@ const POLL_INTERVAL_MS = 5000;
 const MESSAGES_PER_PAGE = 50;
 
 class SlackChannel extends BaseChannel {
+  static get metadata() {
+    return {
+      type: "slack",
+      label: "Slack",
+      color: "purple",
+      description:
+        "Polls Slack channels via the Web API and sends replies via chat.postMessage. Requires a bot token with channels:history and chat:write scopes.",
+      fields: [
+        {
+          key: "botToken",
+          label: "Bot Token",
+          type: "password",
+          placeholder: "xoxb-...",
+          required: true,
+        },
+        {
+          key: "channelIds",
+          label: "Channel IDs",
+          type: "text",
+          placeholder: "C01234567, C09876543",
+          hint: "Comma-separated Slack channel IDs to monitor.",
+          required: true,
+          isList: true,
+        },
+        {
+          key: "appUserId",
+          label: "Bot User ID",
+          type: "text",
+          placeholder: "U01234567",
+          hint: "Optional — auto-detected on connect if omitted.",
+          required: false,
+        },
+      ],
+    };
+  }
+
   /**
    * @param {string} id
    * @param {string} name
@@ -168,8 +204,8 @@ class SlackChannel extends BaseChannel {
     if (messages.length === 0) return;
 
     // Slack returns messages newest-first; process oldest-first.
-    const sorted = [...messages].sort((a, b) =>
-      parseFloat(a.ts) - parseFloat(b.ts),
+    const sorted = [...messages].sort(
+      (a, b) => parseFloat(a.ts) - parseFloat(b.ts),
     );
 
     let latestTs = oldest;

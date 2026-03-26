@@ -74,6 +74,25 @@ class BaseChannel {
     this.onMessageCallback = handler;
   }
 
+  // ─── Metadata ────────────────────────────────────────────────
+
+  /**
+   * Channel implementations should override this static getter to describe
+   * their type, display properties, and configurable fields so the UI can
+   * build add-channel forms dynamically.
+   *
+   * @returns {{ type: string, label: string, color: string, description: string, fields: Array<{ key: string, label: string, type: string, placeholder?: string, hint?: string, required?: boolean }> }}
+   */
+  static get metadata() {
+    return {
+      type: "base",
+      label: "Base",
+      color: "slate",
+      description: "",
+      fields: [],
+    };
+  }
+
   // ─── Status helpers ───────────────────────────────────────────
 
   /**

@@ -23,6 +23,14 @@ import {
 } from "./terminal";
 import { getWorkspace } from "./filesystem";
 
+/** Extract the last meaningful snippet from cumulative streaming text for thought bubbles. */
+function tailThought(text: string, maxLen = 70): string {
+  const lines = text.split("\n").filter((l) => l.trim());
+  const last = lines.length > 0 ? lines[lines.length - 1].trim() : text.trim();
+  if (last.length <= maxLen) return last;
+  return "..." + last.slice(last.length - maxLen + 3);
+}
+
 export interface NewAgentSpec {
   name: string;
   role: string;
@@ -794,8 +802,7 @@ export async function executeTask(
           ? [userMsg, assistantMsg]
           : [...updatedAgent.history, assistantMsg],
         status: "idle",
-        currentThought:
-          result.text.slice(0, 80) + (result.text.length > 80 ? "..." : ""),
+        currentThought: tailThought(result.text, 80),
       },
       reply: result.text,
       cost: result.cost,

@@ -8,25 +8,60 @@ const os = require("os");
 const BaseChannel = require("./base-channel");
 
 // Path to the Messages chat database (read-only access required).
-const CHAT_DB_PATH = path.join(
-  os.homedir(),
-  "Library",
-  "Messages",
-  "chat.db",
-);
+const CHAT_DB_PATH = path.join(os.homedir(), "Library", "Messages", "chat.db");
 
 // How often to poll for new messages (milliseconds).
 const POLL_INTERVAL_MS = 5000;
 
 class ImessageChannel extends BaseChannel {
+  static get metadata() {
+    return {
+      type: "imessage",
+      label: "iMessage",
+      color: "blue",
+      description:
+        "Reads incoming iMessages from the macOS Messages database and sends replies via AppleScript. macOS only. Requires Full Disk Access for the app.",
+      fields: [
+        {
+          key: "allowedSenders",
+          label: "Allowed Senders",
+          type: "text",
+          placeholder: "+15555550100, +15555550200",
+          hint: "Comma-separated phone numbers or emails. Leave empty to allow all.",
+          required: false,
+          isList: true,
+        },
+        {
+          key: "selfHandles",
+          label: "Your iMessage Email Handles",
+          type: "text",
+          placeholder: "you@example.com",
+          hint: "Your own email so messages you send to yourself are picked up. Leave empty to disable email self-messaging.",
+          required: false,
+          isList: true,
+        },
+      ],
+    };
+  }
+
   constructor(id, name, config = {}) {
     super(id, "imessage", name, config);
 
     /** @type {number | null} The highest message ROWID we have already processed. */
     this.lastMessageId = config.lastMessageId || 0;
 
+    /** @type {Set<string>} Normalised set of the user's own iMessage handles. */
+    this._selfHandles = new Set(
+      (config.selfHandles || [])
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean),
+    );
+
     /** @type {ReturnType<typeof setInterval> | null} */
     this._pollTimer = null;
+
+    /** @type {boolean} True while sendMessage is in flight — pauses polling. */
+    this._sending = false;
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────
@@ -103,9 +138,51 @@ class ImessageChannel extends BaseChannel {
       .replace(/"/g, '\\"')
       .replace(/\n/g, "\\n");
 
-    const script = `tell application "Messages" to send "${safe}" to buddy "${conversationId}" of (get first service whose service type = iMessage)`;
+    // Group chat guids look like "iMessage;+;chat123456" — they contain
+    // a semicolon and the word "chat".  For group chats we send to the
+    // chat object directly; for 1:1 we send to a buddy handle.
+    const isGroupChat =
+      conversationId.includes(";") && conversationId.includes("chat");
 
-    await this._runAppleScript(script);
+    const script = isGroupChat
+      ? `tell application "Messages" to send "${safe}" to chat id "${conversationId}"`
+      : `tell application "Messages" to send "${safe}" to buddy "${conversationId}" of (get first service whose service type = iMessage)`;
+
+    this._sending = true;
+    try {
+      await this._runAppleScript(script);
+
+      // ── Self-messaging echo prevention ────────────────────────────
+      // When messaging yourself, iMessage creates an is_from_me=0 "received"
+      // copy that our poller would pick up as a new inbound command.  Bump
+      // lastMessageId past any rows the send just created so the echo is
+      // never processed.
+      //
+      // The Messages DB can take a variable amount of time to flush the
+      // outbound row(s).  We retry up to 3 times with increasing delay
+      // to give the DB time to commit.
+      const preMaxId = this.lastMessageId;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        try {
+          await this._queryDb(
+            "SELECT MAX(ROWID) AS max_id FROM message",
+            (rows) => {
+              const maxId = rows[0]?.max_id;
+              if (maxId != null && maxId > this.lastMessageId) {
+                this.lastMessageId = maxId;
+              }
+            },
+          );
+        } catch {
+          /* non-fatal — the content-hash echo detection is the fallback */
+        }
+        // If the DB has advanced past where we were, the echo row is covered.
+        if (this.lastMessageId > preMaxId) break;
+      }
+    } finally {
+      this._sending = false;
+    }
   }
 
   // ─── Internal helpers ─────────────────────────────────────────
@@ -114,8 +191,26 @@ class ImessageChannel extends BaseChannel {
    * Poll the Messages database for any new inbound messages.
    */
   async _poll() {
+    // Skip polling while an outbound send is in flight — prevents picking
+    // up the echo row before lastMessageId has been bumped past it.
+    if (this._sending) return;
+
     // We join message → handle to get the sender's identifier.
-    // is_from_me = 0 means inbound.
+    // is_from_me = 0 means inbound from others.
+    // When selfHandles is configured we also pick up is_from_me = 1 rows
+    // whose handle matches one of the user's own addresses — this is the
+    // only row created when you iMessage yourself.
+    const selfIn =
+      this._selfHandles.size > 0
+        ? [...this._selfHandles]
+            .map((h) => `'${h.replace(/'/g, "''")}'`)
+            .join(",")
+        : null;
+
+    const selfClause = selfIn
+      ? `OR (m.is_from_me = 1 AND LOWER(h.id) IN (${selfIn}))`
+      : "";
+
     const sql = `
       SELECT
         m.ROWID          AS rowid,
@@ -123,13 +218,15 @@ class ImessageChannel extends BaseChannel {
         m.date           AS date,
         m.is_from_me     AS is_from_me,
         h.id             AS handle_id,
-        c.chat_identifier AS conversation_id
+        c.chat_identifier AS conversation_id,
+        c.guid           AS chat_guid,
+        c.style          AS chat_style
       FROM message m
       LEFT JOIN handle h ON m.handle_id = h.ROWID
       LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
       LEFT JOIN chat c ON c.ROWID = cmj.chat_id
       WHERE m.ROWID > ${this.lastMessageId}
-        AND m.is_from_me = 0
+        AND (m.is_from_me = 0 ${selfClause})
         AND m.text IS NOT NULL
         AND m.text != ''
       ORDER BY m.ROWID ASC
@@ -154,13 +251,22 @@ class ImessageChannel extends BaseChannel {
           ts = row.date * 1000 + 978307200000;
         }
 
+        // style 43 = group chat in the Messages DB.
+        // For group chats we use the full chat guid (e.g.
+        // "iMessage;+;chat123456") as the conversationId so that
+        // sendMessage can address the group directly via AppleScript.
+        const isGroupChat = row.chat_style === 43;
+        const conversationId = isGroupChat
+          ? row.chat_guid || row.conversation_id || row.handle_id
+          : row.conversation_id || row.handle_id;
+
         const msg = {
           channelId: this.id,
           direction: "inbound",
-          conversationId: row.conversation_id || row.handle_id,
+          conversationId,
           sender: row.handle_id,
           content: row.text,
-          metadata: { rowid: row.rowid },
+          metadata: { rowid: row.rowid, isGroupChat },
           timestamp: ts,
         };
 
@@ -188,11 +294,7 @@ class ImessageChannel extends BaseChannel {
           if (err) {
             // A non-zero exit code usually means the DB is locked momentarily;
             // treat as a transient error rather than a fatal one.
-            return reject(
-              new Error(
-                `sqlite3 error: ${stderr || err.message}`,
-              ),
-            );
+            return reject(new Error(`sqlite3 error: ${stderr || err.message}`));
           }
 
           let rows = [];
@@ -201,7 +303,9 @@ class ImessageChannel extends BaseChannel {
               rows = JSON.parse(stdout);
             } catch (parseErr) {
               return reject(
-                new Error(`Failed to parse sqlite3 output: ${parseErr.message}`),
+                new Error(
+                  `Failed to parse sqlite3 output: ${parseErr.message}`,
+                ),
               );
             }
           }

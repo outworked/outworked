@@ -1,6 +1,7 @@
 // ─── Channels Panel ─────────────────────────────────────────────
-// UI for managing messaging channels (iMessage, Slack).
-// Allows adding, connecting, disconnecting, and viewing message history.
+// UI for managing messaging channels.
+// Dynamically discovers available channel types from the backend and
+// builds add-channel forms from their metadata.
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { ChannelConfig, ChannelMessage } from "../lib/types";
@@ -9,8 +10,27 @@ interface ChannelLiveStatus {
   id: string;
   type: string;
   name: string;
+  config: Record<string, unknown>;
   status: "connected" | "disconnected" | "error";
   errorMessage: string | null;
+}
+
+interface ChannelFieldMeta {
+  key: string;
+  label: string;
+  type: string; // "text" | "password"
+  placeholder?: string;
+  hint?: string;
+  required?: boolean;
+  isList?: boolean;
+}
+
+interface ChannelTypeMeta {
+  type: string;
+  label: string;
+  color: string; // tailwind color name, e.g. "blue", "purple"
+  description: string;
+  fields: ChannelFieldMeta[];
 }
 
 function getAPI() {
@@ -40,7 +60,11 @@ function getDb() {
       channelId: string,
       limit: number,
     ) => Promise<ChannelMessage[]>;
-    channelRegister: (config: Record<string, unknown>) => Promise<{ ok: boolean }>;
+    channelTypes: () => Promise<ChannelTypeMeta[]>;
+    channelRegister: (
+      config: Record<string, unknown>,
+    ) => Promise<{ ok: boolean }>;
+    channelRemove: (id: string) => Promise<{ ok: boolean; error?: string }>;
     channelConnect: (id: string) => Promise<{ ok: boolean; error?: string }>;
     channelDisconnect: (id: string) => Promise<{ ok: boolean; error?: string }>;
     channelSend: (
@@ -48,17 +72,83 @@ function getDb() {
       conversationId: string,
       content: string,
     ) => Promise<{ ok: boolean; error?: string }>;
+    channelUpdate: (data: {
+      id: string;
+      name: string;
+      config: Record<string, unknown>;
+    }) => Promise<{ ok: boolean; error?: string }>;
     channelListLive: () => Promise<ChannelLiveStatus[]>;
     channelLoadAll: () => Promise<{ ok: boolean; count: number }>;
     onChannelInbound: (cb: (msg: ChannelMessage) => void) => () => void;
   } | null;
 }
 
-type View = "list" | "add-imessage" | "add-slack" | "messages";
+// Tailwind color maps for dynamic styling
+const colorMap: Record<
+  string,
+  { bg: string; hover: string; text: string; typeBadge: string }
+> = {
+  blue: {
+    bg: "bg-blue-800",
+    hover: "hover:bg-blue-700",
+    text: "text-blue-100",
+    typeBadge: "text-blue-400",
+  },
+  purple: {
+    bg: "bg-purple-800",
+    hover: "hover:bg-purple-700",
+    text: "text-purple-100",
+    typeBadge: "text-purple-400",
+  },
+  green: {
+    bg: "bg-green-800",
+    hover: "hover:bg-green-700",
+    text: "text-green-100",
+    typeBadge: "text-green-400",
+  },
+  amber: {
+    bg: "bg-amber-800",
+    hover: "hover:bg-amber-700",
+    text: "text-amber-100",
+    typeBadge: "text-amber-400",
+  },
+  red: {
+    bg: "bg-red-800",
+    hover: "hover:bg-red-700",
+    text: "text-red-100",
+    typeBadge: "text-red-400",
+  },
+  slate: {
+    bg: "bg-slate-800",
+    hover: "hover:bg-slate-700",
+    text: "text-slate-100",
+    typeBadge: "text-slate-400",
+  },
+  cyan: {
+    bg: "bg-cyan-800",
+    hover: "hover:bg-cyan-700",
+    text: "text-cyan-100",
+    typeBadge: "text-cyan-400",
+  },
+  pink: {
+    bg: "bg-pink-800",
+    hover: "hover:bg-pink-700",
+    text: "text-pink-100",
+    typeBadge: "text-pink-400",
+  },
+};
+const defaultColors = colorMap.slate;
+function getColors(color: string) {
+  return colorMap[color] || defaultColors;
+}
+
+type View = "list" | "add" | "edit" | "messages";
 
 export default function ChannelsPanel() {
   const [channels, setChannels] = useState<ChannelLiveStatus[]>([]);
+  const [channelTypes, setChannelTypes] = useState<ChannelTypeMeta[]>([]);
   const [view, setView] = useState<View>("list");
+  const [addingType, setAddingType] = useState<ChannelTypeMeta | null>(null);
   const [selectedChannel, setSelectedChannel] =
     useState<ChannelLiveStatus | null>(null);
   const [messages, setMessages] = useState<ChannelMessage[]>([]);
@@ -73,9 +163,10 @@ export default function ChannelsPanel() {
       const live = await db.channelListLive();
       setChannels(live || []);
     } catch {
-      // fallback to config list
       const api = getAPI();
-      const dbInner = api?.db as { channelConfigList: () => Promise<ChannelConfig[]> };
+      const dbInner = api?.db as {
+        channelConfigList: () => Promise<ChannelConfig[]>;
+      };
       if (dbInner) {
         const configs = await dbInner.channelConfigList();
         setChannels(
@@ -83,12 +174,22 @@ export default function ChannelsPanel() {
             id: c.id,
             type: c.type,
             name: c.name,
+            config: (c as unknown as { config?: Record<string, unknown> }).config || {},
             status: c.status || "disconnected",
             errorMessage: null,
           })),
         );
       }
     }
+  }, []);
+
+  // Load available channel types on mount
+  useEffect(() => {
+    const db = getDb();
+    if (!db) return;
+    db.channelTypes()
+      .then((types) => setChannelTypes(types || []))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -145,14 +246,7 @@ export default function ChannelsPanel() {
     async (id: string) => {
       const db = getDb();
       if (!db) return;
-      try {
-        await db.channelDisconnect(id).catch(() => {});
-      } catch {
-        /* ignore */
-      }
-      const api = getAPI();
-      const dbRaw = api?.db as { channelConfigDelete: (id: string) => Promise<unknown> };
-      if (dbRaw) await dbRaw.channelConfigDelete(id);
+      await db.channelRemove(id);
       await loadChannels();
       if (selectedChannel?.id === id) {
         setSelectedChannel(null);
@@ -162,16 +256,29 @@ export default function ChannelsPanel() {
     [loadChannels, selectedChannel],
   );
 
-  const handleViewMessages = useCallback(
-    async (ch: ChannelLiveStatus) => {
-      const db = getDb();
-      if (!db) return;
+  const handleViewMessages = useCallback(async (ch: ChannelLiveStatus) => {
+    const db = getDb();
+    if (!db) return;
+    setSelectedChannel(ch);
+    const msgs = await db.channelMessageList(ch.id, 100);
+    setMessages(msgs || []);
+    setView("messages");
+  }, []);
+
+  const handleStartAdd = useCallback((typeMeta: ChannelTypeMeta) => {
+    setAddingType(typeMeta);
+    setView("add");
+    setError(null);
+  }, []);
+
+  const handleStartEdit = useCallback(
+    (ch: ChannelLiveStatus) => {
       setSelectedChannel(ch);
-      const msgs = await db.channelMessageList(ch.id, 100);
-      setMessages(msgs || []);
-      setView("messages");
+      setAddingType(channelTypes.find((t) => t.type === ch.type) || null);
+      setView("edit");
+      setError(null);
     },
-    [],
+    [channelTypes],
   );
 
   return (
@@ -182,6 +289,7 @@ export default function ChannelsPanel() {
           <button
             onClick={() => {
               setView("list");
+              setAddingType(null);
               setError(null);
             }}
             className="text-slate-400 hover:text-white text-xs mr-2"
@@ -191,8 +299,8 @@ export default function ChannelsPanel() {
         )}
         <h3 className="text-sm font-pixel text-white flex-1">
           {view === "list" && "Channels"}
-          {view === "add-imessage" && "Add iMessage"}
-          {view === "add-slack" && "Add Slack"}
+          {view === "add" && `Add ${addingType?.label || "Channel"}`}
+          {view === "edit" && `Edit ${selectedChannel?.name || "Channel"}`}
           {view === "messages" && (selectedChannel?.name || "Messages")}
         </h3>
       </div>
@@ -221,65 +329,72 @@ export default function ChannelsPanel() {
             </div>
           ) : (
             <div className="flex flex-col gap-2">
-              {channels.map((ch) => (
-                <ChannelCard
-                  key={ch.id}
-                  channel={ch}
-                  loading={loading}
-                  onConnect={() => handleConnect(ch.id)}
-                  onDisconnect={() => handleDisconnect(ch.id)}
-                  onDelete={() => handleDelete(ch.id)}
-                  onViewMessages={() => handleViewMessages(ch)}
-                />
-              ))}
+              {channels.map((ch) => {
+                const typeMeta = channelTypes.find((t) => t.type === ch.type);
+                return (
+                  <ChannelCard
+                    key={ch.id}
+                    channel={ch}
+                    typeMeta={typeMeta}
+                    loading={loading}
+                    onConnect={() => handleConnect(ch.id)}
+                    onDisconnect={() => handleDisconnect(ch.id)}
+                    onDelete={() => handleDelete(ch.id)}
+                    onEdit={() => handleStartEdit(ch)}
+                    onViewMessages={() => handleViewMessages(ch)}
+                  />
+                );
+              })}
             </div>
           )}
 
-          <div className="border-t border-slate-700 pt-3 mt-auto">
-            <p className="text-[10px] text-slate-500 font-pixel mb-2">
-              Add Channel
-            </p>
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  setView("add-imessage");
-                  setError(null);
-                }}
-                className="flex-1 btn-pixel text-[10px] bg-blue-800 hover:bg-blue-700 text-blue-100 py-1.5"
-              >
-                iMessage
-              </button>
-              <button
-                onClick={() => {
-                  setView("add-slack");
-                  setError(null);
-                }}
-                className="flex-1 btn-pixel text-[10px] bg-purple-800 hover:bg-purple-700 text-purple-100 py-1.5"
-              >
-                Slack
-              </button>
+          {channelTypes.length > 0 && (
+            <div className="border-t border-slate-700 pt-3 mt-auto">
+              <p className="text-[10px] text-slate-500 font-pixel mb-2">
+                Add Channel
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                {channelTypes.map((typeMeta) => {
+                  const c = getColors(typeMeta.color);
+                  return (
+                    <button
+                      key={typeMeta.type}
+                      onClick={() => handleStartAdd(typeMeta)}
+                      className={`flex-1 min-w-[80px] btn-pixel text-[10px] ${c.bg} ${c.hover} ${c.text} py-1.5`}
+                    >
+                      {typeMeta.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
         </>
       )}
 
-      {/* ── Add iMessage ──────────────────────────────────────────── */}
-      {view === "add-imessage" && (
-        <AddImessageForm
+      {/* ── Add Channel (dynamic form) ────────────────────────────── */}
+      {view === "add" && addingType && (
+        <AddChannelForm
+          typeMeta={addingType}
           onAdded={() => {
             loadChannels();
             setView("list");
+            setAddingType(null);
           }}
           onError={setError}
         />
       )}
 
-      {/* ── Add Slack ─────────────────────────────────────────────── */}
-      {view === "add-slack" && (
-        <AddSlackForm
-          onAdded={() => {
+      {/* ── Edit Channel ──────────────────────────────────────────── */}
+      {view === "edit" && selectedChannel && addingType && (
+        <EditChannelForm
+          channel={selectedChannel}
+          typeMeta={addingType}
+          onSaved={() => {
             loadChannels();
             setView("list");
+            setSelectedChannel(null);
+            setAddingType(null);
           }}
           onError={setError}
         />
@@ -287,10 +402,7 @@ export default function ChannelsPanel() {
 
       {/* ── Message History ───────────────────────────────────────── */}
       {view === "messages" && selectedChannel && (
-        <MessageHistory
-          channel={selectedChannel}
-          messages={messages}
-        />
+        <MessageHistory channel={selectedChannel} messages={messages} />
       )}
     </div>
   );
@@ -300,22 +412,25 @@ export default function ChannelsPanel() {
 
 function ChannelCard({
   channel,
+  typeMeta,
   loading,
   onConnect,
   onDisconnect,
   onDelete,
+  onEdit,
   onViewMessages,
 }: {
   channel: ChannelLiveStatus;
+  typeMeta?: ChannelTypeMeta;
   loading: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
   onDelete: () => void;
+  onEdit: () => void;
   onViewMessages: () => void;
 }) {
-  const typeLabel = channel.type === "imessage" ? "iMessage" : "Slack";
-  const typeColor =
-    channel.type === "imessage" ? "text-blue-400" : "text-purple-400";
+  const typeLabel = typeMeta?.label || channel.type;
+  const c = getColors(typeMeta?.color || "slate");
 
   const statusDot =
     channel.status === "connected"
@@ -331,7 +446,7 @@ function ChannelCard({
         <span className="text-xs text-white font-medium flex-1 truncate">
           {channel.name}
         </span>
-        <span className={`text-[10px] ${typeColor}`}>{typeLabel}</span>
+        <span className={`text-[10px] ${c.typeBadge}`}>{typeLabel}</span>
       </div>
 
       {channel.errorMessage && (
@@ -359,6 +474,12 @@ function ChannelCard({
           </button>
         )}
         <button
+          onClick={onEdit}
+          className="btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200 px-2 py-0.5"
+        >
+          Edit
+        </button>
+        <button
           onClick={onViewMessages}
           className="btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200 px-2 py-0.5"
         >
@@ -375,18 +496,37 @@ function ChannelCard({
   );
 }
 
-// ─── Add iMessage Form ────────────────────────────────────────────
+// ─── Dynamic Add Channel Form ─────────────────────────────────────
 
-function AddImessageForm({
+function AddChannelForm({
+  typeMeta,
   onAdded,
   onError,
 }: {
+  typeMeta: ChannelTypeMeta;
   onAdded: () => void;
   onError: (err: string) => void;
 }) {
-  const [name, setName] = useState("iMessage");
-  const [allowedSenders, setAllowedSenders] = useState("");
+  const [name, setName] = useState(typeMeta.label);
+  const [systemInstructions, setSystemInstructions] = useState("");
+  const [fieldValues, setFieldValues] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const f of typeMeta.fields) {
+      init[f.key] = "";
+    }
+    return init;
+  });
   const [saving, setSaving] = useState(false);
+
+  const c = getColors(typeMeta.color);
+
+  const setField = (key: string, value: string) => {
+    setFieldValues((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const requiredFieldsFilled = typeMeta.fields
+    .filter((f) => f.required)
+    .every((f) => fieldValues[f.key]?.trim());
 
   const handleSubmit = async () => {
     if (!name.trim()) return;
@@ -398,18 +538,33 @@ function AddImessageForm({
 
     setSaving(true);
     try {
-      const id = `imessage-${Date.now()}`;
-      const senders = allowedSenders
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const config = {
+      const id = `${typeMeta.type}-${Date.now()}`;
+      const config: Record<string, unknown> = {};
+
+      for (const field of typeMeta.fields) {
+        const raw = fieldValues[field.key]?.trim();
+        if (!raw) continue;
+
+        if (field.isList) {
+          config[field.key] = raw
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        } else {
+          config[field.key] = raw;
+        }
+      }
+
+      if (systemInstructions.trim()) {
+        config.systemInstructions = systemInstructions.trim();
+      }
+
+      await db.channelRegister({
         id,
-        type: "imessage",
+        type: typeMeta.type,
         name: name.trim(),
-        config: senders.length > 0 ? { allowedSenders: senders } : {},
-      };
-      await db.channelRegister(config);
+        config,
+      });
       onAdded();
     } catch (err: unknown) {
       onError(err instanceof Error ? err.message : "Failed to add channel");
@@ -419,11 +574,9 @@ function AddImessageForm({
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[10px] text-slate-400">
-        Reads incoming iMessages from the macOS Messages database and sends
-        replies via AppleScript. macOS only. Requires Full Disk Access for the
-        app.
-      </p>
+      {typeMeta.description && (
+        <p className="text-[10px] text-slate-400">{typeMeta.description}</p>
+      )}
 
       <label className="text-[10px] text-slate-400 font-pixel">
         Channel Name
@@ -431,51 +584,94 @@ function AddImessageForm({
           className="input-mono w-full mt-1"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="iMessage"
+          placeholder={typeMeta.label}
         />
       </label>
 
+      {typeMeta.fields.map((field) => (
+        <label
+          key={field.key}
+          className="text-[10px] text-slate-400 font-pixel"
+        >
+          {field.label}
+          {field.required && <span className="text-red-400 ml-0.5">*</span>}
+          <input
+            className="input-mono w-full mt-1"
+            type={field.type === "password" ? "password" : "text"}
+            value={fieldValues[field.key] || ""}
+            onChange={(e) => setField(field.key, e.target.value)}
+            placeholder={field.placeholder}
+          />
+          {field.hint && (
+            <span className="text-[9px] text-slate-500 mt-0.5 block">
+              {field.hint}
+            </span>
+          )}
+        </label>
+      ))}
+
       <label className="text-[10px] text-slate-400 font-pixel">
-        Allowed Senders
-        <input
-          className="input-mono w-full mt-1"
-          value={allowedSenders}
-          onChange={(e) => setAllowedSenders(e.target.value)}
-          placeholder="+15555550100, +15555550200"
+        System Instructions
+        <textarea
+          className="input-mono w-full mt-1 min-h-[60px] resize-y"
+          value={systemInstructions}
+          onChange={(e) => setSystemInstructions(e.target.value)}
+          placeholder="e.g. You are a secretary. Only reply with text. always be concise."
+          rows={3}
         />
         <span className="text-[9px] text-slate-500 mt-0.5 block">
-          Comma-separated phone numbers or emails. Leave empty to allow all.
+          Custom instructions for the agent when handling messages on this
+          channel
         </span>
       </label>
 
       <button
         onClick={handleSubmit}
-        disabled={saving || !name.trim()}
-        className="btn-pixel text-[10px] bg-blue-700 hover:bg-blue-600 text-white py-1.5 disabled:opacity-50"
+        disabled={saving || !name.trim() || !requiredFieldsFilled}
+        className={`btn-pixel text-[10px] ${c.bg} ${c.hover} text-white py-1.5 disabled:opacity-50`}
       >
-        {saving ? "Adding..." : "Add iMessage Channel"}
+        {saving ? "Adding..." : `Add ${typeMeta.label} Channel`}
       </button>
     </div>
   );
 }
 
-// ─── Add Slack Form ───────────────────────────────────────────────
+// ─── Edit Channel Form ────────────────────────────────────────────
 
-function AddSlackForm({
-  onAdded,
+function EditChannelForm({
+  channel,
+  typeMeta,
+  onSaved,
   onError,
 }: {
-  onAdded: () => void;
+  channel: ChannelLiveStatus;
+  typeMeta: ChannelTypeMeta;
+  onSaved: () => void;
   onError: (err: string) => void;
 }) {
-  const [name, setName] = useState("Slack");
-  const [botToken, setBotToken] = useState("");
-  const [channelIds, setChannelIds] = useState("");
-  const [appUserId, setAppUserId] = useState("");
+  const cfg = channel.config || {};
+  const [name, setName] = useState(channel.name);
+  const [systemInstructions, setSystemInstructions] = useState(
+    (cfg.systemInstructions as string) || "",
+  );
+  const [fieldValues, setFieldValues] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const f of typeMeta.fields) {
+      const val = cfg[f.key];
+      init[f.key] = Array.isArray(val) ? val.join(", ") : ((val as string) || "");
+    }
+    return init;
+  });
   const [saving, setSaving] = useState(false);
 
+  const c = getColors(typeMeta.color);
+
+  const setField = (key: string, value: string) => {
+    setFieldValues((prev) => ({ ...prev, [key]: value }));
+  };
+
   const handleSubmit = async () => {
-    if (!name.trim() || !botToken.trim() || !channelIds.trim()) return;
+    if (!name.trim()) return;
     const db = getDb();
     if (!db) {
       onError("Not running in Electron");
@@ -484,84 +680,97 @@ function AddSlackForm({
 
     setSaving(true);
     try {
-      const id = `slack-${Date.now()}`;
-      const ids = channelIds
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const config = {
-        id,
-        type: "slack",
+      const config: Record<string, unknown> = {};
+
+      for (const field of typeMeta.fields) {
+        const raw = fieldValues[field.key]?.trim();
+        if (!raw) continue;
+
+        if (field.isList) {
+          config[field.key] = raw
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        } else {
+          config[field.key] = raw;
+        }
+      }
+
+      if (systemInstructions.trim()) {
+        config.systemInstructions = systemInstructions.trim();
+      }
+
+      const result = await db.channelUpdate({
+        id: channel.id,
         name: name.trim(),
-        config: {
-          botToken: botToken.trim(),
-          channelIds: ids,
-          appUserId: appUserId.trim() || undefined,
-        },
-      };
-      await db.channelRegister(config);
-      onAdded();
+        config,
+      });
+      if (!result.ok) {
+        onError(result.error || "Failed to update channel");
+      } else {
+        onSaved();
+      }
     } catch (err: unknown) {
-      onError(err instanceof Error ? err.message : "Failed to add channel");
+      onError(err instanceof Error ? err.message : "Failed to update channel");
     }
     setSaving(false);
   };
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[10px] text-slate-400">
-        Polls Slack channels via the Web API and sends replies via
-        chat.postMessage. Requires a bot token with channels:history and
-        chat:write scopes.
-      </p>
-
       <label className="text-[10px] text-slate-400 font-pixel">
         Channel Name
         <input
           className="input-mono w-full mt-1"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="Slack"
+          placeholder={typeMeta.label}
         />
       </label>
 
-      <label className="text-[10px] text-slate-400 font-pixel">
-        Bot Token
-        <input
-          className="input-mono w-full mt-1"
-          type="password"
-          value={botToken}
-          onChange={(e) => setBotToken(e.target.value)}
-          placeholder="xoxb-..."
-        />
-      </label>
+      {typeMeta.fields.map((field) => (
+        <label
+          key={field.key}
+          className="text-[10px] text-slate-400 font-pixel"
+        >
+          {field.label}
+          {field.required && <span className="text-red-400 ml-0.5">*</span>}
+          <input
+            className="input-mono w-full mt-1"
+            type={field.type === "password" ? "password" : "text"}
+            value={fieldValues[field.key] || ""}
+            onChange={(e) => setField(field.key, e.target.value)}
+            placeholder={field.placeholder}
+          />
+          {field.hint && (
+            <span className="text-[9px] text-slate-500 mt-0.5 block">
+              {field.hint}
+            </span>
+          )}
+        </label>
+      ))}
 
       <label className="text-[10px] text-slate-400 font-pixel">
-        Channel IDs (comma-separated)
-        <input
-          className="input-mono w-full mt-1"
-          value={channelIds}
-          onChange={(e) => setChannelIds(e.target.value)}
-          placeholder="C01234567, C09876543"
+        System Instructions
+        <textarea
+          className="input-mono w-full mt-1 min-h-[60px] resize-y"
+          value={systemInstructions}
+          onChange={(e) => setSystemInstructions(e.target.value)}
+          placeholder="e.g. You are a secretary. Only reply with text, do not use tools."
+          rows={3}
         />
-      </label>
-
-      <label className="text-[10px] text-slate-400 font-pixel">
-        Bot User ID (optional, auto-detected)
-        <input
-          className="input-mono w-full mt-1"
-          value={appUserId}
-          onChange={(e) => setAppUserId(e.target.value)}
-          placeholder="U01234567"
-        />
+        <span className="text-[9px] text-slate-500 mt-0.5 block">
+          Custom instructions for the agent when handling messages on this
+          channel
+        </span>
       </label>
 
       <button
         onClick={handleSubmit}
-        disabled={saving || !name.trim() || !botToken.trim() || !channelIds.trim()}
-        className="btn-pixel text-[10px] bg-purple-700 hover:bg-purple-600 text-white py-1.5 disabled:opacity-50"
+        disabled={saving || !name.trim()}
+        className={`btn-pixel text-[10px] ${c.bg} ${c.hover} text-white py-1.5 disabled:opacity-50`}
       >
-        {saving ? "Adding..." : "Add Slack Channel"}
+        {saving ? "Saving..." : "Save Changes"}
       </button>
     </div>
   );
