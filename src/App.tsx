@@ -16,6 +16,8 @@ import {
 import {
   loadSkills,
   saveSkills,
+  loadGlobalSkillIds,
+  saveGlobalSkillIds,
   createAgent,
   createClaudeAgentFile,
   generateAgentWithAI,
@@ -1349,8 +1351,13 @@ export default function App() {
 
       {showOnboarding && startupDone && (
         <OnboardingModal
-          onComplete={() => {
+          onComplete={async () => {
             setSetting("outworked_onboarding_done", "1");
+            // Seed browser & scheduler as default global skills on first launch
+            const existing = await loadGlobalSkillIds();
+            if (existing.length === 0) {
+              await saveGlobalSkillIds(["bundled:browser", "bundled:scheduler"]);
+            }
             setShowOnboarding(false);
           }}
           onOpenPerms={() => setShowPermsModal(true)}
