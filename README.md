@@ -190,7 +190,7 @@ On first launch, the onboarding modal walks you through picking a workspace and 
 git clone https://github.com/outworked/outworked.git
 cd outworked
 npm install
-npm run electron:build / npm run electron:dev (dev mode)
+npm run electron:build
 ```
 
 ---
