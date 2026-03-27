@@ -146,6 +146,7 @@ export interface SubagentDef {
   background?: boolean;
   isolation?: "worktree";
   mcpServers?: (string | Record<string, McpServerInline>)[];
+  excludeGlobalSkills?: string[];
   hooks?: Record<string, HookMatcher[]>;
   criticalSystemReminder?: string;
   thinking?: "adaptive" | "enabled" | "disabled";

@@ -3,41 +3,65 @@ import { SubagentDef, McpServerInline } from "../lib/types";
 
 // ─── Presets ──────────────────────────────────────────────────
 
-const MCP_PRESETS: {
+interface EnvField {
+  key: string;
+  label: string;
+  required?: boolean;
+  placeholder?: string;
+}
+
+interface McpPreset {
   name: string;
   command: string;
   args?: string[];
   description: string;
-}[] = [
+  env?: EnvField[];
+  /** Extra args appended after the package (e.g. connection string for postgres) */
+  extraArgs?: { label: string; placeholder: string; required?: boolean };
+}
+
+const MCP_PRESETS: McpPreset[] = [
   {
     name: "github",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-github"],
     description: "GitHub repos, issues, PRs",
+    env: [
+      { key: "GITHUB_PERSONAL_ACCESS_TOKEN", label: "GitHub PAT", required: true, placeholder: "ghp_..." },
+    ],
   },
   {
     name: "filesystem",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-filesystem"],
     description: "File system access",
+    extraArgs: { label: "Allowed directories", placeholder: "/Users/me/projects /tmp", required: true },
   },
   {
     name: "postgres",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-postgres"],
     description: "PostgreSQL database",
+    extraArgs: { label: "Connection string", placeholder: "postgresql://user:pass@localhost/db", required: true },
   },
   {
     name: "slack",
     command: "npx",
     args: ["-y", "@anthropic/mcp-server-slack"],
     description: "Slack messages & channels",
+    env: [
+      { key: "SLACK_BOT_TOKEN", label: "Bot Token", required: true, placeholder: "xoxb-..." },
+      { key: "SLACK_TEAM_ID", label: "Team ID", required: true, placeholder: "T0123456789" },
+    ],
   },
   {
     name: "linear",
     command: "npx",
     args: ["-y", "@anthropic/mcp-server-linear"],
     description: "Linear issues & projects",
+    env: [
+      { key: "LINEAR_API_KEY", label: "API Key", required: true, placeholder: "lin_api_..." },
+    ],
   },
   {
     name: "playwright",
@@ -58,6 +82,10 @@ const MCP_PRESETS: {
     description: "HTTP fetching",
   },
 ];
+
+// ─── System servers (always present, non-removable) ──────────
+
+const SYSTEM_SERVERS = ["outworked-skills"];
 
 // ─── Helpers ──────────────────────────────────────────────────
 
@@ -94,11 +122,23 @@ function isPreset(entry: McpEntry): boolean {
   return MCP_PRESETS.some((p) => p.name === name);
 }
 
+function isSystemServer(entry: McpEntry): boolean {
+  return SYSTEM_SERVERS.includes(getServerName(entry));
+}
+
 function hasServer(
   servers: McpEntry[],
   name: string,
 ): boolean {
   return servers.some((e) => getServerName(e) === name);
+}
+
+/** Check if a preset has all required config filled in */
+function presetNeedsSetup(preset: McpPreset): boolean {
+  return !!(
+    (preset.env && preset.env.some((e) => e.required)) ||
+    preset.extraArgs?.required
+  );
 }
 
 // ─── Modal ────────────────────────────────────────────────────
@@ -117,23 +157,54 @@ export default function McpServersModal({
   const servers = mcpServers || [];
   const [creating, setCreating] = useState(false);
   const [editingName, setEditingName] = useState<string | null>(null);
+  const [configuringPreset, setConfiguringPreset] = useState<string | null>(null);
 
-  const togglePreset = (preset: (typeof MCP_PRESETS)[number], enabled: boolean) => {
-    if (enabled) {
-      const entry: McpEntry = {
-        [preset.name]: {
-          type: "stdio",
-          command: preset.command,
-          args: preset.args,
-        },
-      };
+  const savePreset = (preset: McpPreset, envValues: Record<string, string>, extraArgsValue?: string) => {
+    const baseArgs = preset.args || [];
+    const extra = extraArgsValue?.trim().split(/\s+/).filter(Boolean) || [];
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(envValues)) {
+      if (v.trim()) env[k] = v.trim();
+    }
+    const entry: McpEntry = {
+      [preset.name]: {
+        type: "stdio",
+        command: preset.command,
+        args: [...baseArgs, ...extra],
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+      },
+    };
+    // Replace if exists, otherwise append
+    if (hasServer(servers, preset.name)) {
+      onUpdate(servers.map((e) => (getServerName(e) === preset.name ? entry : e)));
+    } else {
       onUpdate([...servers, entry]);
+    }
+    setConfiguringPreset(null);
+  };
+
+  const togglePreset = (preset: McpPreset, enabled: boolean) => {
+    if (enabled) {
+      if (presetNeedsSetup(preset)) {
+        setConfiguringPreset(preset.name);
+      } else {
+        const entry: McpEntry = {
+          [preset.name]: {
+            type: "stdio",
+            command: preset.command,
+            args: preset.args,
+          },
+        };
+        onUpdate([...servers, entry]);
+      }
     } else {
       onUpdate(servers.filter((e) => getServerName(e) !== preset.name));
+      if (configuringPreset === preset.name) setConfiguringPreset(null);
     }
   };
 
   const removeServer = (name: string) => {
+    if (SYSTEM_SERVERS.includes(name)) return;
     onUpdate(servers.filter((e) => getServerName(e) !== name));
   };
 
@@ -174,7 +245,8 @@ export default function McpServersModal({
     setEditingName(null);
   };
 
-  const customServers = servers.filter((e) => !isPreset(e));
+  const systemServers = servers.filter((e) => isSystemServer(e));
+  const customServers = servers.filter((e) => !isPreset(e) && !isSystemServer(e));
 
   return (
     <div
@@ -236,6 +308,45 @@ export default function McpServersModal({
             })()
           ) : (
             <>
+              {/* System servers (always on) */}
+              <section className="space-y-1.5">
+                <p className="text-[9px] font-pixel text-slate-500 uppercase tracking-wider">
+                  System
+                </p>
+                {SYSTEM_SERVERS.map((name) => {
+                  const entry = systemServers.find(
+                    (e) => getServerName(e) === name,
+                  );
+                  const info = entry
+                    ? getServerDisplayInfo(entry)
+                    : { name, detail: "Auto-configured" };
+                  return (
+                    <div
+                      key={name}
+                      className="rounded border border-emerald-700/40 bg-emerald-950/20 p-2.5"
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked
+                          disabled
+                          className="accent-emerald-500 shrink-0 opacity-60"
+                        />
+                        <span className="text-[11px] font-pixel text-slate-200 flex-1 min-w-0 truncate">
+                          {info.name}
+                        </span>
+                        <span className="text-[8px] font-pixel text-emerald-400/70 shrink-0">
+                          always on
+                        </span>
+                      </div>
+                      <p className="text-[9px] text-slate-500 mt-1 ml-6">
+                        Built-in skills, memory, channels & tunnels
+                      </p>
+                    </div>
+                  );
+                })}
+              </section>
+
               {/* Preset servers */}
               <section className="space-y-1.5">
                 <p className="text-[9px] font-pixel text-slate-500 uppercase tracking-wider">
@@ -243,6 +354,13 @@ export default function McpServersModal({
                 </p>
                 {MCP_PRESETS.map((preset) => {
                   const enabled = hasServer(servers, preset.name);
+                  const isConfiguring = configuringPreset === preset.name;
+                  const existingCfg = enabled
+                    ? getServerConfig(
+                        servers.find((e) => getServerName(e) === preset.name)!,
+                      )
+                    : null;
+
                   return (
                     <div
                       key={preset.name}
@@ -264,10 +382,41 @@ export default function McpServersModal({
                         <span className="text-[11px] font-pixel text-slate-200 flex-1 min-w-0 truncate">
                           {preset.name}
                         </span>
+                        {enabled && presetNeedsSetup(preset) && (
+                          <button
+                            onClick={() =>
+                              setConfiguringPreset(
+                                isConfiguring ? null : preset.name,
+                              )
+                            }
+                            className="text-[9px] font-pixel text-slate-500 hover:text-purple-400 shrink-0 transition-colors"
+                          >
+                            {isConfiguring ? "collapse" : "configure"}
+                          </button>
+                        )}
                       </div>
                       <p className="text-[9px] text-slate-500 mt-1 ml-6">
                         {preset.description}
                       </p>
+
+                      {/* Inline env config */}
+                      {isConfiguring && (
+                        <PresetEnvForm
+                          preset={preset}
+                          existingEnv={existingCfg?.env}
+                          existingExtraArgs={
+                            preset.extraArgs && existingCfg?.args
+                              ? existingCfg.args
+                                  .slice((preset.args || []).length)
+                                  .join(" ")
+                              : undefined
+                          }
+                          onSave={(envValues, extraArgs) =>
+                            savePreset(preset, envValues, extraArgs)
+                          }
+                          onCancel={() => setConfiguringPreset(null)}
+                        />
+                      )}
                     </div>
                   );
                 })}
@@ -338,6 +487,96 @@ export default function McpServersModal({
             Done
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Preset env config form ─────────────────────────────────
+
+function PresetEnvForm({
+  preset,
+  existingEnv,
+  existingExtraArgs,
+  onSave,
+  onCancel,
+}: {
+  preset: McpPreset;
+  existingEnv?: Record<string, string>;
+  existingExtraArgs?: string;
+  onSave: (envValues: Record<string, string>, extraArgs?: string) => void;
+  onCancel: () => void;
+}) {
+  const [envValues, setEnvValues] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    for (const field of preset.env || []) {
+      initial[field.key] = existingEnv?.[field.key] || "";
+    }
+    return initial;
+  });
+  const [extraArgs, setExtraArgs] = useState(existingExtraArgs || "");
+
+  const requiredEnvFilled = (preset.env || [])
+    .filter((f) => f.required)
+    .every((f) => envValues[f.key]?.trim());
+  const requiredArgsFilled = !preset.extraArgs?.required || extraArgs.trim();
+  const canSave = requiredEnvFilled && requiredArgsFilled;
+
+  return (
+    <div className="mt-2 ml-6 space-y-2 border-l-2 border-purple-700/30 pl-3">
+      {(preset.env || []).map((field) => (
+        <div key={field.key}>
+          <label className="text-[9px] font-pixel text-slate-500 block mb-0.5">
+            {field.label}
+            {field.required && <span className="text-red-400 ml-0.5">*</span>}
+          </label>
+          <input
+            type="password"
+            value={envValues[field.key] || ""}
+            onChange={(e) =>
+              setEnvValues((prev) => ({ ...prev, [field.key]: e.target.value }))
+            }
+            placeholder={field.placeholder || field.key}
+            className="input-mono text-[10px]"
+          />
+        </div>
+      ))}
+
+      {preset.extraArgs && (
+        <div>
+          <label className="text-[9px] font-pixel text-slate-500 block mb-0.5">
+            {preset.extraArgs.label}
+            {preset.extraArgs.required && (
+              <span className="text-red-400 ml-0.5">*</span>
+            )}
+          </label>
+          <input
+            value={extraArgs}
+            onChange={(e) => setExtraArgs(e.target.value)}
+            placeholder={preset.extraArgs.placeholder}
+            className="input-mono text-[10px]"
+          />
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 pt-1">
+        <div className="flex-1" />
+        <button
+          onClick={onCancel}
+          className="text-[10px] font-pixel text-slate-400 hover:text-slate-200 px-3 py-1 transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={() => {
+            if (!canSave) return;
+            onSave(envValues, preset.extraArgs ? extraArgs : undefined);
+          }}
+          disabled={!canSave}
+          className="btn-pixel bg-purple-600 hover:bg-purple-500 text-[10px] disabled:opacity-50"
+        >
+          Save
+        </button>
       </div>
     </div>
   );

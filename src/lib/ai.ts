@@ -8,7 +8,8 @@ import {
   ClaudeCodeStreamCallbacks,
   PermissionRequest,
 } from "./terminal";
-import { getBundledSkill } from "./bundled-skills";
+import { fetchSkill, fetchAvailableSkills } from "./bundled-skills";
+import { loadGlobalSkillIds } from "./storage";
 
 async function buildThinkingConfig(
   subDef?: SubagentDef,
@@ -39,17 +40,20 @@ The system will route your question and provide their answer before your next st
 `;
 }
 
-function buildSystemPrompt(
+async function buildSystemPrompt(
   agent: Agent,
   withTools: boolean,
   workspace = "",
   skills: AgentSkill[] = [],
-): string {
+): Promise<string> {
   let prompt = agent.personality;
   // Resolve per-agent skill names (from subagentDef) into actual skill objects
-  const agentDefSkills: AgentSkill[] = (agent.subagentDef?.skills || [])
-    .map((name) => getBundledSkill(name))
-    .filter((s): s is AgentSkill => s !== undefined);
+  const agentDefSkillResults = await Promise.all(
+    (agent.subagentDef?.skills || []).map((name) => fetchSkill(name)),
+  );
+  const agentDefSkills = agentDefSkillResults.filter(
+    (s): s is AgentSkill => s !== undefined,
+  );
   // Combine: app-level skills + agent-level skills from subagentDef + legacy agent.skills
   const allSkills = [...skills, ...agentDefSkills, ...agent.skills];
   // Deduplicate by id
@@ -111,11 +115,21 @@ export async function sendMessage(
 ): Promise<SendMessageResult> {
   const useTools = options?.useTools !== false;
   const workspace = useTools ? await getWorkspace() : "";
-  let systemPrompt = buildSystemPrompt(
+
+  // Merge global skills with app-level skills, respecting per-agent exclusions
+  const globalSkillIds = await loadGlobalSkillIds();
+  const excludeSet = new Set(agent.subagentDef?.excludeGlobalSkills || []);
+  const filteredGlobalIds = globalSkillIds.filter((id) => !excludeSet.has(id));
+  const globalSkills = (
+    await Promise.all(filteredGlobalIds.map((id) => fetchSkill(id)))
+  ).filter((s): s is AgentSkill => s !== undefined);
+  const mergedSkills = [...(options?.skills || []), ...globalSkills];
+
+  let systemPrompt = await buildSystemPrompt(
     agent,
     useTools,
     workspace,
-    options?.skills,
+    mergedSkills,
   );
   if (options?.colleagues && options.colleagues.length > 0) {
     systemPrompt +=

@@ -756,6 +756,7 @@ export interface ClaudePermissions {
 
 export interface ClaudeSettingsJson {
   permissions?: ClaudePermissions;
+  mcpServers?: Record<string, Record<string, unknown>>;
   [key: string]: unknown;
 }
 

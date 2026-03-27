@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { Agent, SPRITE_KEYS, AGENT_COLORS, SubagentDef } from "../lib/types";
+import { Agent, AgentSkill, McpServerInline, SPRITE_KEYS, AGENT_COLORS, SubagentDef } from "../lib/types";
 import {
   writeClaudeAgentFile,
   deleteClaudeAgentFile,
   getHomedir,
+  readClaudeSettings,
 } from "../lib/terminal";
 import {
   buildSubagentMd,
   generateAgentWithAI,
+  loadGlobalSkillIds,
   parseSubagentFrontmatter,
 } from "../lib/storage";
+import { fetchSkill } from "../lib/bundled-skills";
 import SkillsModal from "./SkillsModal";
 import McpServersModal from "./McpServersModal";
 
@@ -37,6 +40,23 @@ export default function AgentEditor({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showSkillsModal, setShowSkillsModal] = useState(false);
   const [showMcpModal, setShowMcpModal] = useState(false);
+  const [globalSkills, setGlobalSkills] = useState<AgentSkill[]>([]);
+  const [globalMcpNames, setGlobalMcpNames] = useState<Set<string>>(new Set());
+
+  // Load global skills and MCP servers
+  useEffect(() => {
+    loadGlobalSkillIds().then(async (ids) => {
+      if (ids.length === 0) return;
+      const skills = (await Promise.all(ids.map((id) => fetchSkill(id)))).filter(
+        (s): s is AgentSkill => s !== undefined,
+      );
+      setGlobalSkills(skills);
+    });
+    readClaudeSettings("global").then(({ settings }) => {
+      const names = Object.keys(settings.mcpServers || {});
+      if (names.length > 0) setGlobalMcpNames(new Set(names));
+    });
+  }, []);
 
   // Sync draft when the agent prop's persistent fields change externally
   const prevAgentRef = useRef(agent);
@@ -296,58 +316,110 @@ export default function AgentEditor({
 
         {/* ── Skills (compact) ─────────────────────────────── */}
         <Field label="Skills">
-          <div className="flex flex-wrap gap-1.5">
-            {draft.skills.length === 0 && (
-              <span className="text-[10px] font-pixel text-slate-500">
-                No skills assigned
-              </span>
-            )}
-            {draft.skills.map((s) => (
-              <span
-                key={s.id}
-                className="text-[10px] font-pixel px-2 py-0.5 rounded bg-indigo-900/40 text-indigo-300 border border-indigo-700/50"
-              >
-                {s.name}
-              </span>
-            ))}
-          </div>
-          <button
-            onClick={() => setShowSkillsModal(true)}
-            className="mt-1.5 w-full py-1.5 text-[10px] font-pixel text-slate-400 hover:text-slate-200 border border-dashed border-slate-700 hover:border-slate-500 rounded transition-colors"
-          >
-            Manage Skills...
-          </button>
+          {(() => {
+            const excludeSet = new Set(draft.subagentDef?.excludeGlobalSkills || []);
+            const inheritedSkills = globalSkills.filter((s) => !excludeSet.has(s.id));
+            const inheritedIds = new Set(inheritedSkills.map((s) => s.id));
+            const allBadges = [
+              ...inheritedSkills.map((s) => ({ ...s, inherited: true })),
+              ...draft.skills
+                .filter((s) => !inheritedIds.has(s.id))
+                .map((s) => ({ ...s, inherited: false })),
+            ];
+            return (
+              <>
+                <div className="flex flex-wrap gap-1.5">
+                  {allBadges.length === 0 && (
+                    <span className="text-[10px] font-pixel text-slate-500">
+                      No skills assigned
+                    </span>
+                  )}
+                  {allBadges.map((s) => (
+                    <span
+                      key={s.id}
+                      className={`text-[10px] font-pixel px-2 py-0.5 rounded border ${
+                        s.inherited
+                          ? "bg-slate-800/40 text-slate-400 border-slate-600/50"
+                          : "bg-indigo-900/40 text-indigo-300 border-indigo-700/50"
+                      }`}
+                    >
+                      {s.name}
+                      {s.inherited && (
+                        <span className="text-[8px] text-slate-500 ml-1">
+                          (global)
+                        </span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+                <button
+                  onClick={() => setShowSkillsModal(true)}
+                  className="mt-1.5 w-full py-1.5 text-[10px] font-pixel text-slate-400 hover:text-slate-200 border border-dashed border-slate-700 hover:border-slate-500 rounded transition-colors"
+                >
+                  Manage Skills...
+                </button>
+              </>
+            );
+          })()}
         </Field>
 
         {/* ── MCP Servers ──────────────────────────────────── */}
         <Field label="MCP Servers">
-          <div className="flex flex-wrap gap-1.5">
-            {(!def.mcpServers || def.mcpServers.length === 0) && (
-              <span className="text-[10px] font-pixel text-slate-500">
-                No servers configured
-              </span>
-            )}
-            {(def.mcpServers || []).map((entry) => {
-              const name =
-                typeof entry === "string"
-                  ? entry
-                  : Object.keys(entry)[0] || "?";
-              return (
-                <span
-                  key={name}
-                  className="text-[10px] font-pixel px-2 py-0.5 rounded bg-purple-900/40 text-purple-300 border border-purple-700/50"
+          {(() => {
+            const agentServerNames = new Set(
+              (def.mcpServers || []).map((e) =>
+                typeof e === "string" ? e : Object.keys(e)[0] || "",
+              ),
+            );
+            const allBadges = [
+              // Global servers not also defined per-agent
+              ...[...globalMcpNames]
+                .filter((n) => !agentServerNames.has(n))
+                .map((n) => ({ name: n, isGlobal: true })),
+              // Per-agent servers
+              ...(def.mcpServers || []).map((entry) => ({
+                name:
+                  typeof entry === "string"
+                    ? entry
+                    : Object.keys(entry)[0] || "?",
+                isGlobal: false,
+              })),
+            ];
+            return (
+              <>
+                <div className="flex flex-wrap gap-1.5">
+                  {allBadges.length === 0 && (
+                    <span className="text-[10px] font-pixel text-slate-500">
+                      No servers configured
+                    </span>
+                  )}
+                  {allBadges.map((s) => (
+                    <span
+                      key={s.name}
+                      className={`text-[10px] font-pixel px-2 py-0.5 rounded border ${
+                        s.isGlobal
+                          ? "bg-slate-800/40 text-slate-400 border-slate-600/50"
+                          : "bg-purple-900/40 text-purple-300 border-purple-700/50"
+                      }`}
+                    >
+                      {s.name}
+                      {s.isGlobal && (
+                        <span className="text-[8px] text-slate-500 ml-1">
+                          (global)
+                        </span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+                <button
+                  onClick={() => setShowMcpModal(true)}
+                  className="mt-1.5 w-full py-1.5 text-[10px] font-pixel text-slate-400 hover:text-slate-200 border border-dashed border-slate-700 hover:border-slate-500 rounded transition-colors"
                 >
-                  {name}
-                </span>
-              );
-            })}
-          </div>
-          <button
-            onClick={() => setShowMcpModal(true)}
-            className="mt-1.5 w-full py-1.5 text-[10px] font-pixel text-slate-400 hover:text-slate-200 border border-dashed border-slate-700 hover:border-slate-500 rounded transition-colors"
-          >
-            Manage MCP Servers...
-          </button>
+                  Manage MCP Servers...
+                </button>
+              </>
+            );
+          })()}
         </Field>
 
         {/* ── Advanced ─────────────────────────────────────── */}
@@ -579,6 +651,25 @@ export default function AgentEditor({
       {showSkillsModal && (
         <SkillsModal
           agentSkills={draft.skills}
+          globalSkillIds={new Set(globalSkills.map((s) => s.id))}
+          excludedGlobalSkillIds={new Set(draft.subagentDef?.excludeGlobalSkills || [])}
+          onToggleGlobalSkill={(skillId, include) => {
+            setDraft((prev) => {
+              const currentExcludes =
+                prev.subagentDef?.excludeGlobalSkills || [];
+              const newExcludes = include
+                ? currentExcludes.filter((id) => id !== skillId)
+                : [...currentExcludes, skillId];
+              return {
+                ...prev,
+                subagentDef: {
+                  ...(prev.subagentDef || { description: prev.role || "" }),
+                  excludeGlobalSkills:
+                    newExcludes.length > 0 ? newExcludes : undefined,
+                } as SubagentDef,
+              };
+            });
+          }}
           onUpdate={(skills) => setDraft((prev) => ({ ...prev, skills }))}
           onClose={() => {
             setShowSkillsModal(false);

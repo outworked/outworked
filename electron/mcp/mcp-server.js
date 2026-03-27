@@ -275,7 +275,24 @@ const BUILTIN_TOOLS = [
     description: "List all active cloudflared tunnels and their public URLs.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "list_skills",
+    description:
+      "List all available skills with their documentation and connection status. Use this to discover what capabilities (tools) are available to you and how to use them.",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
+
+// ─── Skill documentation ─────────────────────────────────────────
+
+/**
+ * Return available skills with their SKILL.md documentation.
+ * Used by the list_skills MCP tool so agents can self-discover capabilities.
+ */
+function getSkillDocs() {
+  if (!_skillManager) return [];
+  return _skillManager.getAllSkillDocs();
+}
 
 // ─── Skill tool discovery ───────────────────────────────────────
 
@@ -458,6 +475,29 @@ async function executeTool(name, args) {
       }
       return lines.join("\n");
     }
+    case "list_skills": {
+      const sections = [];
+
+      // Runtime-backed skills (with tools)
+      const skills = getSkillDocs();
+      for (const s of skills) {
+        const statusTag = s.status === "connected" ? "✅ connected" : `⚠️ ${s.status}`;
+        const doc = s.doc || "(no documentation)";
+        sections.push(`## ${s.name} [${statusTag}]\n\n${doc}`);
+      }
+
+      // Custom skills (documentation-only, from DB)
+      const customSkills = db.customSkillList();
+      for (const cs of customSkills) {
+        const emoji = cs.emoji ? `${cs.emoji} ` : "";
+        sections.push(`## ${emoji}${cs.name} [📄 custom]\n\n${cs.content || cs.description || "(no documentation)"}`);
+      }
+
+      if (sections.length === 0) {
+        return "No skills available.";
+      }
+      return sections.join("\n\n---\n\n");
+    }
     default: {
       // Skill tools — resolve via tool index
       if (!_skillManager) return `Error: skill runtime manager not available`;
@@ -521,20 +561,27 @@ async function handleMcpRequest(msg, agentId = null) {
       }
       try {
         const result = await executeTool(toolName, toolArgs);
+
+        // Tools can return structured MCP content (e.g. images) via __mcp_content
+        let content;
+        if (result && typeof result === "object" && result.__mcp_content) {
+          content = result.__mcp_content;
+        } else {
+          content = [
+            {
+              type: "text",
+              text:
+                typeof result === "string"
+                  ? result
+                  : JSON.stringify(result, null, 2),
+            },
+          ];
+        }
+
         return {
           jsonrpc: "2.0",
           id,
-          result: {
-            content: [
-              {
-                type: "text",
-                text:
-                  typeof result === "string"
-                    ? result
-                    : JSON.stringify(result, null, 2),
-              },
-            ],
-          },
+          result: { content },
         };
       } catch (err) {
         return {

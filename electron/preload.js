@@ -245,6 +245,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("skill-runtime:disconnect", runtime),
     skillRuntimeStatus: (runtime) =>
       ipcRenderer.invoke("skill-runtime:status", runtime),
+    skillRuntimeGetDocs: (opts) =>
+      ipcRenderer.invoke("skill-runtime:getSkillDocs", opts),
 
     // Channel manager (lifecycle + messaging)
     channelTypes: () => ipcRenderer.invoke("channel:types"),

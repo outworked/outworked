@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { AgentSkill } from "../lib/types";
-import { getBundledSkills } from "../lib/bundled-skills";
+import { fetchAvailableSkills } from "../lib/bundled-skills";
 import { isSkillFormat, parseSkill } from "../lib/skill-parser";
 
 // ─── Custom skill DB type ─────────────────────────────────────
@@ -92,14 +92,23 @@ interface SkillsModalProps {
   agentSkills: AgentSkill[];
   onUpdate: (skills: AgentSkill[]) => void;
   onClose: () => void;
+  /** All global skill IDs (used to determine which skills are global) */
+  globalSkillIds?: Set<string>;
+  /** Global skill IDs that are currently excluded for this agent */
+  excludedGlobalSkillIds?: Set<string>;
+  /** Called when a global skill is toggled (true = include, false = exclude) */
+  onToggleGlobalSkill?: (skillId: string, include: boolean) => void;
 }
 
 export default function SkillsModal({
   agentSkills,
   onUpdate,
   onClose,
+  globalSkillIds,
+  excludedGlobalSkillIds,
+  onToggleGlobalSkill,
 }: SkillsModalProps) {
-  const bundled = getBundledSkills();
+  const [bundled, setBundled] = useState<AgentSkill[]>([]);
   const [customSkills, setCustomSkills] = useState<CustomSkillRecord[]>([]);
   const [authStatuses, setAuthStatuses] = useState<Record<string, string>>({});
   const [authenticating, setAuthenticating] = useState<string | null>(null);
@@ -107,10 +116,15 @@ export default function SkillsModal({
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
+    fetchAvailableSkills().then(setBundled).catch(console.error);
+
     const csApi = getCustomSkillAPI();
     if (csApi)
       csApi.customSkillList().then(setCustomSkills).catch(console.error);
+  }, []);
 
+  useEffect(() => {
+    if (bundled.length === 0) return;
     const authApi = getSkillAuthAPI();
     if (!authApi) return;
     (async () => {
@@ -127,7 +141,7 @@ export default function SkillsModal({
       }
       setAuthStatuses(statuses);
     })();
-  }, []);
+  }, [bundled]);
 
   const toggleSkill = (skill: AgentSkill, enabled: boolean) => {
     if (enabled) {
@@ -285,7 +299,10 @@ export default function SkillsModal({
                     Built-in
                   </p>
                   {bundled.map((skill) => {
-                    const isEnabled = agentSkills.some(
+                    const isGlobal = globalSkillIds?.has(skill.id) ?? false;
+                    const isExcluded = excludedGlobalSkillIds?.has(skill.id) ?? false;
+                    const isInherited = isGlobal && !isExcluded;
+                    const isEnabled = isInherited || agentSkills.some(
                       (s) => s.id === skill.id,
                     );
                     const runtime = skill.metadata?.runtime;
@@ -308,14 +325,25 @@ export default function SkillsModal({
                           <input
                             type="checkbox"
                             checked={isEnabled}
-                            onChange={(e) =>
-                              toggleSkill(skill, e.target.checked)
-                            }
+                            onChange={(e) => {
+                              if (isGlobal) {
+                                // Global skill: toggle exclude list
+                                onToggleGlobalSkill?.(skill.id, e.target.checked);
+                              } else {
+                                // Agent-specific skill: toggle agent skill list
+                                toggleSkill(skill, e.target.checked);
+                              }
+                            }}
                             className="accent-indigo-500 shrink-0"
                           />
                           <span className="text-[11px] font-pixel text-slate-200 flex-1 min-w-0 truncate">
                             {skill.name}
                           </span>
+                          {isInherited && (
+                            <span className="text-[8px] font-pixel px-1.5 py-0.5 rounded shrink-0 bg-slate-700/50 text-slate-400 border border-slate-600/50">
+                              global
+                            </span>
+                          )}
                           {needsAuth && (
                             <span
                               className={`text-[9px] font-pixel px-1.5 py-0.5 rounded shrink-0 ${
@@ -372,7 +400,10 @@ export default function SkillsModal({
                 </p>
 
                 {customSkills.map((cs) => {
-                  const isEnabled = agentSkills.some((s) => s.id === cs.id);
+                  const isGlobal = globalSkillIds?.has(cs.id) ?? false;
+                  const isExcluded = excludedGlobalSkillIds?.has(cs.id) ?? false;
+                  const isInherited = isGlobal && !isExcluded;
+                  const isEnabled = isInherited || agentSkills.some((s) => s.id === cs.id);
 
                   return (
                     <div
@@ -387,17 +418,23 @@ export default function SkillsModal({
                         <input
                           type="checkbox"
                           checked={isEnabled}
-                          onChange={(e) =>
-                            toggleSkill(
-                              customToAgentSkill(cs),
-                              e.target.checked,
-                            )
-                          }
+                          onChange={(e) => {
+                            if (isGlobal) {
+                              onToggleGlobalSkill?.(cs.id, e.target.checked);
+                            } else {
+                              toggleSkill(customToAgentSkill(cs), e.target.checked);
+                            }
+                          }}
                           className="accent-indigo-500 shrink-0"
                         />
                         <span className="text-[11px] font-pixel text-slate-200 flex-1 min-w-0 truncate">
                           {cs.name}
                         </span>
+                        {isInherited && (
+                          <span className="text-[8px] font-pixel px-1.5 py-0.5 rounded shrink-0 bg-slate-700/50 text-slate-400 border border-slate-600/50">
+                            global
+                          </span>
+                        )}
                         <button
                           onClick={() => {
                             setEditingId(cs.id);

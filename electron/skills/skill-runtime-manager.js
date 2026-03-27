@@ -54,6 +54,58 @@ const _middleware = [];
 /** Weak ref to the mainWindow used to push events to renderer */
 let _mainWindow = null;
 
+// ── SKILL.md cache ──────────────────────────────────────────────
+
+/** @type {Map<string, string>} runtime name -> raw SKILL.md content */
+const _skillDocs = new Map();
+
+/**
+ * Read and cache the SKILL.md file for a runtime directory.
+ * @param {string} runtimeName
+ * @param {string} dirPath — absolute path to the runtime's directory
+ */
+function _loadSkillDoc(runtimeName, dirPath) {
+  const skillMdPath = path.join(dirPath, "SKILL.md");
+  try {
+    if (fs.existsSync(skillMdPath)) {
+      _skillDocs.set(runtimeName, fs.readFileSync(skillMdPath, "utf8"));
+    }
+  } catch (err) {
+    verbose &&
+      console.warn(
+        `[skill-runtime-manager] Failed to read SKILL.md for '${runtimeName}': ${err.message}`,
+      );
+  }
+}
+
+/**
+ * Return the raw SKILL.md content for a runtime, or null if none.
+ * @param {string} name
+ * @returns {string | null}
+ */
+function getSkillDoc(name) {
+  return _skillDocs.get(name) || null;
+}
+
+/**
+ * Return skill docs for all registered runtimes, optionally filtered to
+ * connected-only. Each entry includes runtime name, status, and raw SKILL.md.
+ * @param {{ connectedOnly?: boolean }} [opts]
+ * @returns {Array<{ name: string, status: string, doc: string | null }>}
+ */
+function getAllSkillDocs(opts = {}) {
+  const results = [];
+  for (const [name, runtime] of runtimes) {
+    if (opts.connectedOnly && runtime.status !== "connected") continue;
+    results.push({
+      name,
+      status: runtime.status,
+      doc: _skillDocs.get(name) || null,
+    });
+  }
+  return results;
+}
+
 // ── Auto-discovery ───────────────────────────────────────────────
 
 /**
@@ -95,12 +147,30 @@ async function discoverAndRegister() {
         continue;
       }
 
+      // Load SKILL.md before instantiation so docs are available even if init fails
+      const dirPath = path.join(skillsDir, entry.name);
+      _loadSkillDoc(entry.name, dirPath);
+
       const runtime = new RuntimeClass();
       await runtime.init();
       registerRuntime(runtime);
+
+      // Auto-connect runtimes that don't require auth (e.g. browser, scheduler)
+      if (!runtime.getAuthConfig() && runtime.status !== "connected") {
+        try {
+          await runtime.authenticate({});
+          await _persistAuth(runtime);
+        } catch (err) {
+          verbose &&
+            console.warn(
+              `[skill-runtime-manager] Auto-connect failed for '${runtime.name}': ${err.message}`,
+            );
+        }
+      }
+
       verbose &&
         console.log(
-          `[skill-runtime-manager] Discovered and registered: ${runtime.name}`,
+          `[skill-runtime-manager] Discovered and registered: ${runtime.name} (${runtime.status})`,
         );
     } catch (err) {
       console.error(
@@ -495,6 +565,10 @@ function setupSkillRuntimeIPC(ipcMain, mainWindow) {
   ipcMain.handle("skill-runtime:getTools", (_event, name) => {
     return getToolsForRuntime(name);
   });
+
+  ipcMain.handle("skill-runtime:getSkillDocs", (_event, opts) => {
+    return getAllSkillDocs(opts);
+  });
 }
 
 // ── Internal helpers ─────────────────────────────────────────────
@@ -649,6 +723,8 @@ module.exports = {
   disconnectRuntime,
   executeTool,
   getToolsForRuntime,
+  getSkillDoc,
+  getAllSkillDocs,
   destroyAll,
   setupSkillRuntimeIPC,
 };

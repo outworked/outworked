@@ -17,6 +17,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getSetting, setSetting, getSettingJSON, setSettingJSON } from "./settings";
 
 const SKILLS_KEY = "outworked_skills";
+const GLOBAL_SKILLS_KEY = "outworked_global_skills";
 
 /** Parse outworked-skills JSON from frontmatter back into AgentSkill[] */
 function parseOutworkedSkills(raw: unknown): AgentSkill[] {
@@ -72,6 +73,18 @@ export async function loadSkills(): Promise<AgentSkill[]> {
 export async function saveSkills(skills: AgentSkill[]): Promise<void> {
   if (typeof window === "undefined") return;
   await setSettingJSON(SKILLS_KEY, skills);
+}
+
+// ─── Global skills (available to all agents) ──────────────────
+
+export async function loadGlobalSkillIds(): Promise<string[]> {
+  if (typeof window === "undefined") return [];
+  return getSettingJSON<string[]>(GLOBAL_SKILLS_KEY, []);
+}
+
+export async function saveGlobalSkillIds(ids: string[]): Promise<void> {
+  if (typeof window === "undefined") return;
+  await setSettingJSON(GLOBAL_SKILLS_KEY, ids);
 }
 
 export function resetProject(agents: Agent[]): Agent[] {
@@ -177,6 +190,10 @@ export function buildSubagentMd(agent: Agent, slug: string): string {
         }
       }
     }
+  }
+  if (def.excludeGlobalSkills && def.excludeGlobalSkills.length > 0) {
+    fm += "excludeGlobalSkills:\n";
+    for (const id of def.excludeGlobalSkills) fm += `  - ${JSON.stringify(id)}\n`;
   }
   if (def.hooks && Object.keys(def.hooks).length > 0) {
     fm += "hooks:\n";
@@ -463,6 +480,9 @@ export function parseSubagentFrontmatter(content: string): {
       background: raw.background as boolean | undefined,
       isolation: raw.isolation as SubagentDef["isolation"] | undefined,
       mcpServers,
+      excludeGlobalSkills: Array.isArray(raw.excludeGlobalSkills)
+        ? raw.excludeGlobalSkills.map(String)
+        : undefined,
       hooks,
       criticalSystemReminder: raw["criticalSystemReminder_EXPERIMENTAL"] as string | undefined,
       thinking: raw.thinking as SubagentDef["thinking"] | undefined,
@@ -744,6 +764,7 @@ export async function loadAgentsFromDisk(
       background: def.background,
       isolation: def.isolation,
       mcpServers: def.mcpServers,
+      excludeGlobalSkills: def.excludeGlobalSkills,
       hooks: def.hooks,
     };
 
