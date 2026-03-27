@@ -546,7 +546,9 @@ async function handleMcpRequest(msg, agentId = null, allowedRuntimes = null) {
   const { id, method, params } = msg;
 
   verbose &&
-    console.log(`[mcp] Received request: ${method} with params:`, params);
+    console.log(
+      `[mcp] Received request: ${method} with agentId: ${agentId}, allowedRuntimes: ${allowedRuntimes}, params: ${JSON.stringify(params)}`,
+    );
 
   switch (method) {
     case "initialize":

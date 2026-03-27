@@ -1,4 +1,4 @@
-import { Agent, AgentSkill, ApiKeys, Message, SubagentDef, ToolCall } from "./types";
+import { Agent, AgentSkill, ApiKeys, McpServerInline, Message, SubagentDef, ToolCall } from "./types";
 import { AGENT_TOOLS, ToolDefinition, executeTool } from "./tools";
 import { getWorkspace } from "./filesystem";
 import { getSetting } from "./settings";
@@ -7,6 +7,7 @@ import {
   ClaudeCodeAdvancedOptions,
   ClaudeCodeStreamCallbacks,
   PermissionRequest,
+  readClaudeSettings,
 } from "./terminal";
 import { fetchSkill, fetchAvailableSkills } from "./bundled-skills";
 import { loadGlobalSkillIds } from "./storage";
@@ -186,13 +187,7 @@ export async function sendMessage(
     ...agentDefSkillResults,
     ...agentSkillsResolved,
   ];
-  const allowedRuntimes = [
-    ...new Set(
-      allResolvedSkills
-        .map((s) => s.metadata?.runtime)
-        .filter((r): r is string => !!r),
-    ),
-  ];
+  const allowedRuntimes = buildAllowedRuntimes(allResolvedSkills);
 
   return invokeClaudeCode({
     prompt,
@@ -210,6 +205,76 @@ export async function sendMessage(
   });
 }
 
+
+// ─── MCP server assembly (exported for testing) ─────────────────
+
+/**
+ * Build the list of MCP servers that will be passed to Claude Code for a
+ * given agent. Includes agent-specific MCP servers from the subagent
+ * definition plus the always-running outworked-skills server (with
+ * per-agent runtime filtering via query string).
+ */
+export function buildMcpServers(opts: {
+  subDef?: SubagentDef;
+  agentId?: string;
+  allowedRuntimes?: string[];
+  useTools: boolean;
+  globalMcpServers?: Record<string, Record<string, unknown>>;
+}): (string | Record<string, McpServerInline>)[] {
+  const { subDef, agentId, allowedRuntimes, useTools, globalMcpServers } = opts;
+
+  // Start with global MCP servers (from ~/.claude/settings.json),
+  // filtering out our outworked-skills entry (we always add our own below).
+  const mcpServers: (string | Record<string, McpServerInline>)[] = [];
+  if (globalMcpServers) {
+    for (const [name, cfg] of Object.entries(globalMcpServers)) {
+      if (name === "outworked-skills") continue;
+      mcpServers.push({ [name]: cfg as unknown as McpServerInline });
+    }
+  }
+
+  // Add agent-specific MCP servers, filtering out any duplicate
+  // outworked-skills entry (we always add our own below).
+  if (subDef?.mcpServers) {
+    for (const s of subDef.mcpServers) {
+      if (typeof s === "object" && s !== null && "outworked-skills" in s) continue;
+      mcpServers.push(s);
+    }
+  }
+
+  if (useTools) {
+    const qsParts: string[] = [];
+    if (agentId) qsParts.push(`agentId=${encodeURIComponent(agentId)}`);
+    if (allowedRuntimes) {
+      qsParts.push(`runtimes=${encodeURIComponent(allowedRuntimes.join(","))}`);
+    }
+    const qs = qsParts.length > 0 ? `?${qsParts.join("&")}` : "";
+    mcpServers.push({
+      "outworked-skills": {
+        type: "http" as const,
+        url: `http://127.0.0.1:7823/mcp${qs}`,
+      },
+    });
+  }
+
+  return mcpServers;
+}
+
+/**
+ * Determine which skill runtimes an agent is allowed to use, based on
+ * the union of all resolved skills (merged global + agent-level + legacy).
+ */
+export function buildAllowedRuntimes(
+  allResolvedSkills: AgentSkill[],
+): string[] {
+  return [
+    ...new Set(
+      allResolvedSkills
+        .map((s) => s.metadata?.runtime)
+        .filter((r): r is string => !!r),
+    ),
+  ];
+}
 
 // ─── Claude Code invocation ──────────────────────────────────────
 // Single entry point for all Claude Code SDK calls.
@@ -237,27 +302,16 @@ async function invokeClaudeCode(opts: InvokeOptions): Promise<SendMessageResult>
   const isResume = !!agent?.sessionId;
   const workspace = await getWorkspace();
 
-  // Build MCP servers list — include user-configured ones plus the always-running
-  // outworked-skills server. Skip MCP when tools are disabled (e.g. router calls).
-  let mcpServers = subDef?.mcpServers
-    ? subDef.mcpServers.filter(
-        (s) => !(typeof s === "object" && s !== null && "outworked-skills" in s),
-      )
-    : [];
-  if (useTools) {
-    const qsParts: string[] = [];
-    if (agent?.id) qsParts.push(`agentId=${encodeURIComponent(agent.id)}`);
-    if (allowedRuntimes) {
-      qsParts.push(`runtimes=${encodeURIComponent(allowedRuntimes.join(","))}`);
-    }
-    const qs = qsParts.length > 0 ? `?${qsParts.join("&")}` : "";
-    mcpServers.push({
-      "outworked-skills": {
-        type: "http" as const,
-        url: `http://127.0.0.1:7823/mcp${qs}`,
-      },
-    });
-  }
+  // Load global MCP servers from ~/.claude/settings.json
+  const { settings: claudeSettings } = await readClaudeSettings("global");
+
+  const mcpServers = buildMcpServers({
+    subDef,
+    agentId: agent?.id,
+    allowedRuntimes,
+    useTools,
+    globalMcpServers: claudeSettings.mcpServers,
+  });
 
   // If the agent has an allowlist, ensure our MCP server tools are permitted.
   // Claude Code prefixes MCP tools with "mcp__<serverName>__<toolName>".
