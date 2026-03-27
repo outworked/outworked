@@ -296,11 +296,24 @@ function getSkillDocs() {
 
 // ─── Skill tool discovery ───────────────────────────────────────
 
-function getSkillTools() {
-  verbose && console.log("[mcp] Discovering skill tools...");
+/**
+ * @param {Set<string>|null} allowedRuntimes — if non-null, only include tools
+ *   from runtimes whose name is in this set. When null, all connected runtimes
+ *   are included (backwards-compatible default).
+ */
+function getSkillTools(allowedRuntimes = null) {
+  verbose &&
+    console.log(
+      "[mcp] Discovering skill tools... allowedRuntimes:",
+      allowedRuntimes,
+    );
   if (!_skillManager) return [];
   const tools = [];
+  if (!allowedRuntimes || allowedRuntimes.size === 0) {
+    return [];
+  }
   for (const runtime of _skillManager.listRuntimes()) {
+    if (allowedRuntimes && !allowedRuntimes.has(runtime.name)) continue;
     const r = _skillManager.getRuntime(runtime.name);
     if (r && r.status === "connected") {
       for (const t of r.getTools()) {
@@ -312,6 +325,11 @@ function getSkillTools() {
       }
     }
   }
+  verbose &&
+    console.log(
+      `[mcp] Found ${tools.length} skill tools:`,
+      tools.map((t) => t.name),
+    );
   return tools;
 }
 
@@ -481,7 +499,8 @@ async function executeTool(name, args) {
       // Runtime-backed skills (with tools)
       const skills = getSkillDocs();
       for (const s of skills) {
-        const statusTag = s.status === "connected" ? "✅ connected" : `⚠️ ${s.status}`;
+        const statusTag =
+          s.status === "connected" ? "✅ connected" : `⚠️ ${s.status}`;
         const doc = s.doc || "(no documentation)";
         sections.push(`## ${s.name} [${statusTag}]\n\n${doc}`);
       }
@@ -490,7 +509,9 @@ async function executeTool(name, args) {
       const customSkills = db.customSkillList();
       for (const cs of customSkills) {
         const emoji = cs.emoji ? `${cs.emoji} ` : "";
-        sections.push(`## ${emoji}${cs.name} [📄 custom]\n\n${cs.content || cs.description || "(no documentation)"}`);
+        sections.push(
+          `## ${emoji}${cs.name} [📄 custom]\n\n${cs.content || cs.description || "(no documentation)"}`,
+        );
       }
 
       if (sections.length === 0) {
@@ -521,7 +542,7 @@ async function executeTool(name, args) {
 
 // ─── MCP JSON-RPC handler ───────────────────────────────────────
 
-async function handleMcpRequest(msg, agentId = null) {
+async function handleMcpRequest(msg, agentId = null, allowedRuntimes = null) {
   const { id, method, params } = msg;
 
   verbose &&
@@ -544,7 +565,7 @@ async function handleMcpRequest(msg, agentId = null) {
       return null;
 
     case "tools/list": {
-      const skillTools = getSkillTools();
+      const skillTools = getSkillTools(allowedRuntimes);
       return {
         jsonrpc: "2.0",
         id,
@@ -558,6 +579,25 @@ async function handleMcpRequest(msg, agentId = null) {
       // Inject agentId from the session URL if not explicitly provided
       if (agentId && !toolArgs.agentId) {
         toolArgs.agentId = agentId;
+      }
+      // Block skill tools that aren't in the agent's allowed runtimes
+      if (allowedRuntimes && _skillManager) {
+        const resolvedRuntime = _skillManager.resolveToolRuntime(toolName);
+        if (resolvedRuntime && !allowedRuntimes.has(resolvedRuntime)) {
+          return {
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: `Error: tool "${toolName}" is not available to this agent`,
+                },
+              ],
+              isError: true,
+            },
+          };
+        }
       }
       try {
         const result = await executeTool(toolName, toolArgs);
@@ -628,12 +668,17 @@ function start() {
     }
 
     const reqUrl = new URL(req.url, "http://127.0.0.1");
+    console.log(`[mcp] ${req.method} ${req.url}`);
     if (reqUrl.pathname !== "/mcp") {
       res.writeHead(404);
       res.end();
       return;
     }
     const _reqAgentId = reqUrl.searchParams.get("agentId") || null;
+    const _runtimesParam = reqUrl.searchParams.get("runtimes");
+    const _allowedRuntimes = _runtimesParam
+      ? new Set(_runtimesParam.split(",").filter(Boolean))
+      : null;
 
     if (req.method === "DELETE") {
       // Session termination — we're stateless so just acknowledge
@@ -673,7 +718,11 @@ function start() {
           return;
         }
 
-        const response = await handleMcpRequest(msg, _reqAgentId);
+        const response = await handleMcpRequest(
+          msg,
+          _reqAgentId,
+          _allowedRuntimes,
+        );
 
         if (!response) {
           // Notification — no response body, just 202

@@ -169,11 +169,37 @@ export async function sendMessage(
     }
   }
 
+  // Collect allowed skill runtime names from the agent's resolved skills
+  // so the MCP server only exposes tools for skills this agent has access to.
+  // Re-resolve agent.skills by ID via fetchSkill to get full metadata (including
+  // runtime), since agent.skills loaded from .md files may lack metadata.
+  const agentSkillsResolved = (
+    await Promise.all(agent.skills.map((s) => fetchSkill(s.id)))
+  ).filter((s): s is AgentSkill => s !== undefined);
+  const agentDefSkillResults = (
+    await Promise.all(
+      (agent.subagentDef?.skills || []).map((name) => fetchSkill(name)),
+    )
+  ).filter((s): s is AgentSkill => s !== undefined);
+  const allResolvedSkills = [
+    ...mergedSkills,
+    ...agentDefSkillResults,
+    ...agentSkillsResolved,
+  ];
+  const allowedRuntimes = [
+    ...new Set(
+      allResolvedSkills
+        .map((s) => s.metadata?.runtime)
+        .filter((r): r is string => !!r),
+    ),
+  ];
+
   return invokeClaudeCode({
     prompt,
     systemPrompt: systemPrompt,
     agent,
     useTools,
+    allowedRuntimes,
     onThought,
     signal,
     onClaudeCodeEvent: options?.onClaudeCodeEvent,
@@ -193,6 +219,7 @@ interface InvokeOptions {
   systemPrompt: string;
   agent?: Agent;
   useTools?: boolean;
+  allowedRuntimes?: string[];
   onThought: (text: string) => void;
   signal?: AbortSignal;
   onClaudeCodeEvent?: SendOptions["onClaudeCodeEvent"];
@@ -204,7 +231,7 @@ interface InvokeOptions {
 
 async function invokeClaudeCode(opts: InvokeOptions): Promise<SendMessageResult> {
   const { prompt, systemPrompt, agent, onThought, signal,
-    onClaudeCodeEvent, onPermissionRequest, onStderr, outputFormat, thinking } = opts;
+    onClaudeCodeEvent, onPermissionRequest, onStderr, outputFormat, thinking, allowedRuntimes } = opts;
   const useTools = opts.useTools !== false;
   const subDef = agent?.subagentDef;
   const isResume = !!agent?.sessionId;
@@ -218,11 +245,16 @@ async function invokeClaudeCode(opts: InvokeOptions): Promise<SendMessageResult>
       )
     : [];
   if (useTools) {
-    const agentParam = agent?.id ? `?agentId=${encodeURIComponent(agent.id)}` : "";
+    const qsParts: string[] = [];
+    if (agent?.id) qsParts.push(`agentId=${encodeURIComponent(agent.id)}`);
+    if (allowedRuntimes) {
+      qsParts.push(`runtimes=${encodeURIComponent(allowedRuntimes.join(","))}`);
+    }
+    const qs = qsParts.length > 0 ? `?${qsParts.join("&")}` : "";
     mcpServers.push({
       "outworked-skills": {
         type: "http" as const,
-        url: `http://127.0.0.1:7823/mcp${agentParam}`,
+        url: `http://127.0.0.1:7823/mcp${qs}`,
       },
     });
   }
