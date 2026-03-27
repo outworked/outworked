@@ -250,6 +250,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
     // Channel manager (lifecycle + messaging)
     channelTypes: () => ipcRenderer.invoke("channel:types"),
+    channelDocs: (type) => ipcRenderer.invoke("channel:docs", type),
     channelRegister: (config) => ipcRenderer.invoke("channel:register", config),
     channelRemove: (id) => ipcRenderer.invoke("channel:remove", id),
     channelUpdate: (data) => ipcRenderer.invoke("channel:update", data),

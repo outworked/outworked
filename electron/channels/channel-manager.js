@@ -3,6 +3,8 @@
 // messages, persists all traffic to SQLite, and bridges inbound events
 // to the renderer via IPC.
 
+const path = require("path");
+const fs = require("fs");
 const db = require("../db/database");
 const verbose = process.env.VERBOSE_LOGGING === "true";
 
@@ -227,6 +229,17 @@ function setupChannelIPC(ipcMain, mainWindow) {
   // build add-channel forms dynamically.
   ipcMain.handle("channel:types", () => {
     return getAvailableTypes();
+  });
+
+  // ── channel:docs ───────────────────────────────────────────────
+  // Return the setup documentation markdown for a channel type.
+  ipcMain.handle("channel:docs", (_event, type) => {
+    const mdPath = path.join(__dirname, `${type}-channel.md`);
+    try {
+      return fs.readFileSync(mdPath, "utf-8");
+    } catch {
+      return null;
+    }
   });
 
   // ── channel:register ──────────────────────────────────────────
@@ -531,7 +544,11 @@ function _handleInbound(channelId, msg) {
         `Channel: ${channelId}\n` +
         `Conversation: ${full.conversationId || "unknown"}\n\n` +
         `Message:\n${full.content}\n\n` +
-        `You MUST reply using the send_message tool with channelId="${channelId}" and conversationId="${full.conversationId || full.sender}".`;
+        `You MUST reply using the send_message tool with channelId="${channelId}" and conversationId="${full.conversationId || full.sender}".\n\n` +
+        `## Reply Protocol\n` +
+        `1. FIRST, send a brief confirmation message acknowledging you received the message (e.g. "Got it, looking into this now." or "On it, one moment."). This lets the sender know their message was received.\n` +
+        `2. THEN, process the request and send your full reply with the actual response.\n` +
+        `Keep the confirmation short and natural — do not repeat the sender's message back to them.`;
 
       _mainWindowContents.send("trigger:fire", {
         triggerId: "__default_channel_message",

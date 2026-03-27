@@ -264,13 +264,22 @@ function killAllShells() {
 
 // ─── Caffeinate: prevent sleep while tasks are in flight ──────────
 let caffeinateBlockerId = null;
+let caffeinateType = null; // "prevent-app-suspension" | "prevent-display-sleep"
 
-function caffeineStart() {
-  if (caffeinateBlockerId !== null) return; // already blocking
-  caffeinateBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+function caffeineStart(type) {
+  if (caffeinateBlockerId !== null) {
+    // Already blocking — upgrade to stronger type if needed
+    if (type === "prevent-display-sleep" && caffeinateType !== "prevent-display-sleep") {
+      caffeineStop();
+    } else {
+      return;
+    }
+  }
+  caffeinateType = type;
+  caffeinateBlockerId = powerSaveBlocker.start(type);
   verbose &&
     console.log(
-      `[caffeinate] started power-save blocker id=${caffeinateBlockerId}`,
+      `[caffeinate] started power-save blocker id=${caffeinateBlockerId} type=${type}`,
     );
 }
 
@@ -284,13 +293,21 @@ function caffeineStop() {
       );
   }
   caffeinateBlockerId = null;
+  caffeinateType = null;
 }
 
 /** Call after adding/removing sessions to sync caffeinate state. */
 function syncCaffeinate() {
   const hasChannels = _hasConnectedChannels();
-  if (sdkBridge.hasActiveSessions() || hasChannels) caffeineStart();
-  else caffeineStop();
+  const hasSessions = sdkBridge.hasActiveSessions();
+  if (hasChannels) {
+    // Channels need the stronger blocker to prevent system sleep
+    caffeineStart("prevent-display-sleep");
+  } else if (hasSessions) {
+    caffeineStart("prevent-app-suspension");
+  } else {
+    caffeineStop();
+  }
 }
 
 /** Check if any registered channel is currently connected. */

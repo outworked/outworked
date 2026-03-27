@@ -4,6 +4,7 @@
 // builds add-channel forms from their metadata.
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import MarkdownMessage from "./MarkdownMessage";
 import { ChannelConfig, ChannelMessage } from "../lib/types";
 
 interface ChannelLiveStatus {
@@ -61,6 +62,7 @@ function getDb() {
       limit: number,
     ) => Promise<ChannelMessage[]>;
     channelTypes: () => Promise<ChannelTypeMeta[]>;
+    channelDocs: (type: string) => Promise<string | null>;
     channelRegister: (
       config: Record<string, unknown>,
     ) => Promise<{ ok: boolean }>;
@@ -154,6 +156,10 @@ export default function ChannelsPanel() {
   const [messages, setMessages] = useState<ChannelMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [infoModal, setInfoModal] = useState<{
+    typeMeta: ChannelTypeMeta;
+    docs: string;
+  } | null>(null);
 
   const loadChannels = useCallback(async () => {
     const db = getDb();
@@ -265,7 +271,15 @@ export default function ChannelsPanel() {
     setView("messages");
   }, []);
 
-  const handleStartAdd = useCallback((typeMeta: ChannelTypeMeta) => {
+  const handleStartAdd = useCallback(async (typeMeta: ChannelTypeMeta) => {
+    const db = getDb();
+    if (db) {
+      const docs = await db.channelDocs(typeMeta.type);
+      if (docs) {
+        setInfoModal({ typeMeta, docs });
+        return;
+      }
+    }
     setAddingType(typeMeta);
     setView("add");
     setError(null);
@@ -328,7 +342,7 @@ export default function ChannelsPanel() {
               No channels configured yet.
             </div>
           ) : (
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto">
               {channels.map((ch) => {
                 const typeMeta = channelTypes.find((t) => t.type === ch.type);
                 return (
@@ -353,14 +367,14 @@ export default function ChannelsPanel() {
               <p className="text-[10px] text-slate-500 font-pixel mb-2">
                 Add Channel
               </p>
-              <div className="flex gap-2 flex-wrap">
+              <div className="grid grid-cols-2 gap-2 max-h-[200px] overflow-y-auto">
                 {channelTypes.map((typeMeta) => {
                   const c = getColors(typeMeta.color);
                   return (
                     <button
                       key={typeMeta.type}
                       onClick={() => handleStartAdd(typeMeta)}
-                      className={`flex-1 min-w-[80px] btn-pixel text-[10px] ${c.bg} ${c.hover} ${c.text} py-1.5`}
+                      className={`btn-pixel text-[10px] ${c.bg} ${c.hover} ${c.text} py-1.5 truncate`}
                     >
                       {typeMeta.label}
                     </button>
@@ -382,6 +396,12 @@ export default function ChannelsPanel() {
             setAddingType(null);
           }}
           onError={setError}
+          onShowDocs={async () => {
+            const db = getDb();
+            if (!db) return;
+            const docs = await db.channelDocs(addingType.type);
+            if (docs) setInfoModal({ typeMeta: addingType, docs });
+          }}
         />
       )}
 
@@ -403,6 +423,21 @@ export default function ChannelsPanel() {
       {/* ── Message History ───────────────────────────────────────── */}
       {view === "messages" && selectedChannel && (
         <MessageHistory channel={selectedChannel} messages={messages} />
+      )}
+
+      {/* ── Setup Info Modal ──────────────────────────────────────── */}
+      {infoModal && (
+        <ChannelInfoModal
+          typeMeta={infoModal.typeMeta}
+          docs={infoModal.docs}
+          onContinue={() => {
+            setAddingType(infoModal.typeMeta);
+            setInfoModal(null);
+            setView("add");
+            setError(null);
+          }}
+          onClose={() => setInfoModal(null)}
+        />
       )}
     </div>
   );
@@ -502,10 +537,12 @@ function AddChannelForm({
   typeMeta,
   onAdded,
   onError,
+  onShowDocs,
 }: {
   typeMeta: ChannelTypeMeta;
   onAdded: () => void;
   onError: (err: string) => void;
+  onShowDocs?: () => void;
 }) {
   const [name, setName] = useState(typeMeta.label);
   const [systemInstructions, setSystemInstructions] = useState("");
@@ -576,6 +613,16 @@ function AddChannelForm({
     <div className="flex flex-col gap-3">
       {typeMeta.description && (
         <p className="text-[10px] text-slate-400">{typeMeta.description}</p>
+      )}
+
+      {onShowDocs && (
+        <button
+          type="button"
+          onClick={onShowDocs}
+          className="text-[10px] text-slate-400 hover:text-white underline underline-offset-2 self-start"
+        >
+          View Setup Guide
+        </button>
       )}
 
       <label className="text-[10px] text-slate-400 font-pixel">
@@ -772,6 +819,70 @@ function EditChannelForm({
       >
         {saving ? "Saving..." : "Save Changes"}
       </button>
+    </div>
+  );
+}
+
+// ─── Channel Info Modal ───────────────────────────────────────────
+
+function ChannelInfoModal({
+  typeMeta,
+  docs,
+  onContinue,
+  onClose,
+}: {
+  typeMeta: ChannelTypeMeta;
+  docs: string;
+  onContinue: () => void;
+  onClose: () => void;
+}) {
+  const c = getColors(typeMeta.color);
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50"
+      onClick={onClose}
+    >
+      <div
+        className="bg-slate-900 border border-slate-600 rounded-lg w-[480px] max-h-[80vh] shadow-2xl flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+          <h3 className="text-sm font-pixel text-white">
+            {typeMeta.label} Setup Guide
+          </h3>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-white text-lg leading-none"
+          >
+            &times;
+          </button>
+        </div>
+
+        {/* Docs content */}
+        <div className="flex-1 overflow-y-auto px-4 py-3 text-xs text-slate-300 leading-relaxed">
+          <MarkdownMessage
+            content={docs.replace(/<details>[\s\S]*?<\/details>/g, "").trim()}
+          />
+        </div>
+
+        {/* Actions */}
+        <div className="flex gap-2 px-4 py-3 border-t border-slate-700">
+          <button
+            onClick={onClose}
+            className="btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 flex-1"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onContinue}
+            className={`btn-pixel text-[10px] ${c.bg} ${c.hover} text-white px-3 py-1.5 flex-1`}
+          >
+            Continue to Setup
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
