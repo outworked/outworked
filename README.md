@@ -14,13 +14,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/outworked/outworked/releases/download/v0.3.0/Outworked-0.3.0-arm64.dmg">
-    <img src="https://img.shields.io/badge/Download_for_macOS-v0.3.0-brightgreen?style=for-the-badge&logo=apple" alt="Download for macOS" />
+  <a href="https://github.com/outworked/outworked/releases/download/v0.3.1/Outworked-0.3.1-arm64.dmg">
+    <img src="https://img.shields.io/badge/Download_for_macOS-v0.3.1-brightgreen?style=for-the-badge&logo=apple" alt="Download for macOS" />
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.3.0-green.svg" alt="Version" /></a>
+  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.3.1-green.svg" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%203.0-blue.svg" alt="License: GPL-3.0" /></a>
   <img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="Platform" />
 </p>
