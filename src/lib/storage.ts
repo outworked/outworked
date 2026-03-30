@@ -505,6 +505,7 @@ export function parseSubagentFrontmatter(content: string): {
         raw["outworked-boss"] === true || raw["outworked-boss"] === "true"
           ? true
           : undefined,
+      "outworked-sprite-sheet": raw["outworked-sprite-sheet"] as string | undefined,
       "outworked-skills": raw["outworked-skills"],
     },
     body,
