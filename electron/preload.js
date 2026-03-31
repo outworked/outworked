@@ -88,6 +88,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return () =>
         ipcRenderer.removeListener("claude-code:permission-request", listener);
     },
+    onPermissionResolved: (cb) => {
+      const listener = (_event, permId, allow) => cb(permId, allow);
+      ipcRenderer.on("claude-code:permission-resolved", listener);
+      return () =>
+        ipcRenderer.removeListener("claude-code:permission-resolved", listener);
+    },
+    broadcastStop: (agentId) =>
+      ipcRenderer.send("claude-code:stop-agent", agentId),
+    onStopRequested: (cb) => {
+      const listener = (_event, agentId) => cb(agentId);
+      ipcRenderer.on("claude-code:stop-agent", listener);
+      return () =>
+        ipcRenderer.removeListener("claude-code:stop-agent", listener);
+    },
     onChunk: (cb) => {
       const listener = (_event, reqId, data) => cb(reqId, data);
       ipcRenderer.on("claude-code:chunk", listener);
@@ -377,6 +391,43 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // Auto-updater
+  // Popout chat window
+  popout: {
+    open: (agentId) => ipcRenderer.invoke("popout:open", agentId),
+    close: () => ipcRenderer.invoke("popout:close"),
+    isOpen: () => ipcRenderer.invoke("popout:isOpen"),
+    // Main window pushes state to popout
+    pushState: (data) => ipcRenderer.send("popout:pushState", data),
+    // Popout sends actions to main window
+    sendAction: (action) => ipcRenderer.send("popout:sendAction", action),
+    // Listen for state updates (popout window listens to this)
+    onStateUpdate: (cb) => {
+      const listener = (_event, data) => cb(data);
+      ipcRenderer.on("popout:stateUpdate", listener);
+      return () => ipcRenderer.removeListener("popout:stateUpdate", listener);
+    },
+    // Listen for actions from popout (main window listens to this)
+    onAction: (cb) => {
+      const listener = (_event, action) => cb(action);
+      ipcRenderer.on("popout:action", listener);
+      return () => ipcRenderer.removeListener("popout:action", listener);
+    },
+    // Signal that popout is mounted and ready to receive state
+    signalReady: () => ipcRenderer.send("popout:ready"),
+    // Listen for popout ready (main window listens to this)
+    onReady: (cb) => {
+      const listener = () => cb();
+      ipcRenderer.on("popout:ready", listener);
+      return () => ipcRenderer.removeListener("popout:ready", listener);
+    },
+    // Listen for popout closed (main window listens to this)
+    onClosed: (cb) => {
+      const listener = () => cb();
+      ipcRenderer.on("popout:closed", listener);
+      return () => ipcRenderer.removeListener("popout:closed", listener);
+    },
+  },
+
   updater: {
     check: () => ipcRenderer.invoke("updater:check"),
     download: () => ipcRenderer.invoke("updater:download"),

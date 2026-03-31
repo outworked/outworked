@@ -21,7 +21,7 @@ import {
 } from "../lib/orchestrator";
 import type { AgentTeamCallbacks } from "../lib/orchestrator";
 import { createAgent, createClaudeAgentFile } from "../lib/storage";
-import { resolveClaudePermission, PermissionRequest } from "../lib/terminal";
+import { resolveClaudePermission, onClaudePermissionRequest, onClaudePermissionResolved, broadcastStopAgent, onStopAgentRequested, PermissionRequest } from "../lib/terminal";
 import {
   createSession,
   saveSession,
@@ -32,6 +32,7 @@ import {
 } from "../lib/sessions";
 import { addExchange, clearExchanges, parseAskRequests } from "../lib/agentBus";
 import { getSetting } from "../lib/settings";
+import InlinePermissionCard from "./InlinePermissionCard";
 import PermissionModal from "./PermissionModal";
 import MarkdownMessage from "./MarkdownMessage";
 
@@ -73,6 +74,11 @@ interface ChatWindowProps {
   /** Programmatically injected message (e.g. from a trigger). Consumed once. */
   pendingMessage?: { text: string; nonce: string } | null;
   onPendingMessageConsumed?: () => void;
+  /**
+   * If provided, called instead of the built-in send logic.
+   * Used by the popout window to relay messages to the main window.
+   */
+  onInterceptSend?: (text: string) => void;
 }
 
 const EMPTY_KEYS = { openai: "", anthropic: "", gemini: "", github: "" };
@@ -177,6 +183,7 @@ export default function ChatWindow({
   onStartBackgroundTask,
   pendingMessage,
   onPendingMessageConsumed,
+  onInterceptSend,
 }: ChatWindowProps) {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -264,6 +271,47 @@ export default function ChatWindow({
   useEffect(() => {
     if (debugMode) setShowDebug(true);
   }, [debugMode]);
+
+  // In popout mode, listen for permission requests via global IPC broadcast
+  // (the main window's SDK callbacks won't fire here since we don't run the SDK)
+  useEffect(() => {
+    if (!onInterceptSend) return; // only in popout mode
+    const unsub = onClaudePermissionRequest((_reqId, request) => {
+      handleIncomingPermission(request, request.agentName || agent?.name);
+    });
+    return unsub;
+  }, [onInterceptSend, agent?.name, agent?.id, autoApprovePermissions]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Listen for permission resolved broadcast — clears pending state when the
+  // other window (main or popout) has already handled the approval/denial.
+  useEffect(() => {
+    const unsub = onClaudePermissionResolved((permId) => {
+      setPendingPermission((prev) => (prev?.permId === permId ? null : prev));
+    });
+    return unsub;
+  }, []);
+
+  // Listen for stop requests broadcast from the popout window
+  useEffect(() => {
+    if (onInterceptSend) return; // popout doesn't need to listen — it's the sender
+    const unsub = onStopAgentRequested((agentId) => {
+      if (agent && agent.id === agentId) {
+        if (abortRef.current) {
+          abortRef.current.abort();
+        } else if (agentBusy) {
+          onUpdateAgent({
+            ...agent,
+            status: "idle",
+            currentThought: "",
+            liveStreamText: "",
+            liveToolCalls: [],
+            liveThinking: "",
+          });
+        }
+      }
+    });
+    return unsub;
+  }, [onInterceptSend, agent?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Elapsed timer — ticks every second while streaming or background task is running
   const hasRunningBgTask = agent
@@ -413,6 +461,12 @@ export default function ChatWindow({
     // Allow sending when boss has active orchestration (employees working, boss is free)
     if (isStreaming && !(agent.isBoss && activeOrchestrationRef.current))
       return;
+    // Popout mode: relay the message instead of executing locally
+    if (onInterceptSend) {
+      setInput("");
+      onInterceptSend(text);
+      return;
+    }
     const userText = text;
     setInput("");
     setWorkStartedAt(Date.now());
@@ -2166,6 +2220,11 @@ export default function ChatWindow({
     agent.status !== "waiting-approval";
 
   function handleStop() {
+    if (onInterceptSend && agent) {
+      // Popout mode — broadcast stop to the main window
+      broadcastStopAgent(agent.id);
+      return;
+    }
     if (abortRef.current) {
       abortRef.current.abort();
     } else if (agent && agentBusy) {
@@ -2829,8 +2888,15 @@ export default function ChatWindow({
           </div>
         ))}
 
-        {/* Permission modal rendered at top level via portal-like z-50 */}
+        {/* Inline permission approval card in chat stream */}
         {pendingPermission && (
+          <InlinePermissionCard
+            request={pendingPermission}
+            onRespond={handlePermissionResponse}
+          />
+        )}
+        {/* Full-screen modal (portaled to body) — only on main window, not popout */}
+        {pendingPermission && !onInterceptSend && (
           <PermissionModal
             request={pendingPermission}
             onRespond={handlePermissionResponse}

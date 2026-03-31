@@ -60,7 +60,11 @@ import NotificationCenter, {
 } from "./components/NotificationCenter";
 import OnboardingModal from "./components/OnboardingModal";
 import AssetsModal from "./components/AssetsModal";
-import { getActivePack, listAssetPacks, applyCustomFont } from "./lib/assetPack";
+import {
+  getActivePack,
+  listAssetPacks,
+  applyCustomFont,
+} from "./lib/assetPack";
 import { AppNotification, showDesktopNotification } from "./lib/notifications";
 import {
   getSetting,
@@ -141,10 +145,32 @@ function mergeRuntimeState(prev: Agent[], fresh: Agent[]): Agent[] {
   return merged;
 }
 
+// Detect popout mode from URL query params
+const IS_POPOUT = (() => {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("mode") === "popout";
+  } catch {
+    return false;
+  }
+})();
+
+const POPOUT_INITIAL_AGENT_ID = (() => {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("agentId") || null;
+  } catch {
+    return null;
+  }
+})();
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(
+    IS_POPOUT ? POPOUT_INITIAL_AGENT_ID : null,
+  );
   const [rightPanel, setRightPanel] = useState<RightPanel>("chat");
+  const [popoutOpen, setPopoutOpen] = useState(false);
   const [skills, setSkills] = useState<AgentSkill[]>([]);
   const [instructionRuns, setInstructionRuns] = useState<InstructionRun[]>([]);
   const [agentTeamsEnabled, setAgentTeamsEnabled] = useState(false);
@@ -180,6 +206,24 @@ export default function App() {
 
   useEffect(() => {
     async function init() {
+      // Popout receives all state from main window — only load font
+      if (IS_POPOUT) {
+        try {
+          const activePackId = await getActivePack();
+          if (activePackId) {
+            const packs = await listAssetPacks();
+            const pack = packs.find(
+              (p: { id: string }) => p.id === activePackId,
+            );
+            if (pack) await applyCustomFont(pack);
+          }
+        } catch {
+          /* non-critical */
+        }
+        setStartupDone(true);
+        return;
+      }
+
       // Load persisted settings from SQLite
       const [
         savedWs,
@@ -326,6 +370,115 @@ export default function App() {
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
 
+  // ── Popout chat window state sync ─────────────────────────────
+  const popoutAPI = (
+    window as unknown as {
+      electronAPI?: { popout?: import("./lib/terminal").PopoutAPI };
+    }
+  ).electronAPI?.popout;
+
+  // Counter bumped when popout signals ready — triggers a state push
+  const [popoutReady, setPopoutReady] = useState(0);
+
+  // Main window: listen for popout close, ready, and relayed actions
+  useEffect(() => {
+    if (IS_POPOUT || !popoutAPI) return;
+    const unsubClosed = popoutAPI.onClosed(() => setPopoutOpen(false));
+    const unsubReady = popoutAPI.onReady(() => setPopoutReady((n) => n + 1));
+    const unsubAction = popoutAPI.onAction((action: unknown) => {
+      const a = action as {
+        type: string;
+        agentId?: string;
+        text?: string;
+        nonce?: string;
+        panel?: RightPanel;
+        agent?: Agent;
+      };
+      if (a.type === "selectAgent") {
+        setSelectedAgentId(a.agentId || null);
+      } else if (a.type === "sendMessage" && a.agentId && a.text) {
+        setSelectedAgentId(a.agentId);
+        setRightPanel("chat");
+        setPendingMessage({
+          text: a.text,
+          nonce: a.nonce || crypto.randomUUID(),
+        });
+      } else if (a.type === "setPanel" && a.panel) {
+        setRightPanel(a.panel);
+      } else if (a.type === "saveAgent" && a.agent) {
+        handleSaveAgent(a.agent);
+      } else if (a.type === "deleteAgent" && a.agentId) {
+        handleDeleteAgent(a.agentId);
+      }
+    });
+    return () => {
+      unsubClosed();
+      unsubReady();
+      unsubAction();
+    };
+  }, [popoutAPI]);
+
+  // Main window: push full state to popout whenever it changes
+  // (popoutReady ensures the first push lands after the listener is registered)
+  useEffect(() => {
+    if (IS_POPOUT || !popoutOpen || !popoutAPI) return;
+    popoutAPI.pushState({
+      agents,
+      selectedAgentId,
+      rightPanel,
+      skills,
+      agentTeamsEnabled,
+      debugMode,
+      autoApproveAll,
+      backgroundTasks,
+      workspaceDir,
+    });
+  }, [
+    agents,
+    selectedAgentId,
+    rightPanel,
+    popoutOpen,
+    popoutReady,
+    skills,
+    agentTeamsEnabled,
+    debugMode,
+    autoApproveAll,
+    backgroundTasks,
+    workspaceDir,
+  ]);
+
+  // Popout: receive state from main window, then signal ready
+  useEffect(() => {
+    if (!IS_POPOUT || !popoutAPI) return;
+    const unsub = popoutAPI.onStateUpdate((data: unknown) => {
+      const d = data as {
+        agents?: Agent[];
+        selectedAgentId?: string | null;
+        rightPanel?: RightPanel;
+        skills?: AgentSkill[];
+        agentTeamsEnabled?: boolean;
+        debugMode?: boolean;
+        autoApproveAll?: boolean;
+        backgroundTasks?: BackgroundTask[];
+        workspaceDir?: string | null;
+      };
+      if (d.agents) setAgents(d.agents as Agent[]);
+      if (d.selectedAgentId !== undefined)
+        setSelectedAgentId(d.selectedAgentId);
+      if (d.rightPanel) setRightPanel(d.rightPanel);
+      if (d.agentTeamsEnabled !== undefined)
+        setAgentTeamsEnabled(d.agentTeamsEnabled);
+      if (d.debugMode !== undefined) setDebugMode(d.debugMode);
+      if (d.autoApproveAll !== undefined) setAutoApproveAll(d.autoApproveAll);
+      if (d.skills) setSkills(d.skills);
+      if (d.backgroundTasks) setBackgroundTasks(d.backgroundTasks);
+      if (d.workspaceDir !== undefined) setWorkspaceDir(d.workspaceDir);
+    });
+    // Signal ready so main window re-pushes state now that listener is active
+    popoutAPI.signalReady();
+    return unsub;
+  }, [popoutAPI]);
+
   // ── Trigger / channel-message listener ──────────────────────────
   const [pendingMessage, setPendingMessage] = useState<{
     text: string;
@@ -436,9 +589,7 @@ export default function App() {
         (k) => !EPHEMERAL_KEYS.has(k) && updated[k] !== old[k],
       );
 
-    setAgents((prev) =>
-      prev.map((a) => (a.id === updated.id ? updated : a)),
-    );
+    setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
 
     // Disk write outside the state updater — safe from StrictMode double-fire
     if (hasPersistentChange) {
@@ -842,6 +993,48 @@ export default function App() {
     }
   }
 
+  // ── Popout mode: full right panel with real ChatWindow ───────────
+  // The popout runs the real ChatWindow so the UI matches exactly.
+  // Agent state changes are relayed back to the main window to keep
+  // both sides in sync.
+  if (IS_POPOUT) {
+    return (
+      <PopoutPanel
+        agents={agents}
+        selectedAgent={selectedAgent}
+        selectedAgentId={selectedAgentId}
+        rightPanel={rightPanel}
+        workspaceDir={workspaceDir}
+        skills={skills}
+        agentTeamsEnabled={agentTeamsEnabled}
+        autoApproveAll={autoApproveAll}
+        debugMode={debugMode}
+        backgroundTasks={backgroundTasks}
+        onSelectAgent={(id) => {
+          popoutAPI?.sendAction({ type: "selectAgent", agentId: id });
+        }}
+        onSetRightPanel={(panel) => {
+          popoutAPI?.sendAction({ type: "setPanel", panel });
+        }}
+        onInterceptSend={(text) => {
+          if (!selectedAgent) return;
+          popoutAPI?.sendAction({
+            type: "sendMessage",
+            agentId: selectedAgent.id,
+            text,
+            nonce: crypto.randomUUID(),
+          });
+        }}
+        onSaveAgent={(agent) => {
+          popoutAPI?.sendAction({ type: "saveAgent", agent });
+        }}
+        onDeleteAgent={(agentId) => {
+          popoutAPI?.sendAction({ type: "deleteAgent", agentId });
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden">
       <div className="sr-only" aria-live="polite">
@@ -857,15 +1050,26 @@ export default function App() {
           </div>
           <button
             onClick={() => setShowAssetsModal(true)}
-            className="text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+            className="text-slate-500 hover:text-slate-300 transition-colors cursor-pointer items-center flex flex-col"
             title="Asset Packs"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
               <rect x="3" y="3" width="7" height="7" />
               <rect x="14" y="3" width="7" height="7" />
               <rect x="3" y="14" width="7" height="7" />
               <rect x="14" y="14" width="7" height="7" />
             </svg>
+            <div className="text-[8px] font-pixel">customize</div>
           </button>
         </div>
         {/* Update banner */}
@@ -1176,7 +1380,41 @@ export default function App() {
           </div>
         </main>
 
-        <aside className="w-80 shrink-0 border-l border-slate-700 flex flex-col bg-slate-900/95 overflow-hidden">
+        {/* Collapsed dock strip when popout is open */}
+        {popoutOpen && (
+          <aside className="w-10 shrink-0 border-l border-slate-700 flex flex-col items-center bg-slate-900/95 py-3 gap-3">
+            <button
+              onClick={async () => {
+                await popoutAPI?.close();
+                setPopoutOpen(false);
+              }}
+              title="Close popout & restore panel"
+              className="text-indigo-400 hover:text-indigo-300 cursor-pointer transition-colors"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="2" y="3" width="20" height="18" rx="2" />
+                <line x1="15" y1="3" x2="15" y2="21" />
+                <polyline points="9 10 12 13 9 16" />
+              </svg>
+            </button>
+          </aside>
+        )}
+        {/* Right panel — always mounted to preserve ChatWindow streaming state.
+            Hidden (zero-width + invisible) when popout is open so the components
+            stay alive but don't occupy layout space. */}
+        <aside
+          className={`shrink-0 border-l border-slate-700 flex flex-col bg-slate-900/95 overflow-hidden ${popoutOpen ? "w-0 invisible" : "w-80"}`}
+        >
           <PermissionsBanner workspace={workspaceDir} />
           <div className="border-b border-gray-800">
             {/* Row 1: global tabs — always visible */}
@@ -1201,6 +1439,33 @@ export default function App() {
                     </button>
                   );
                 },
+              )}
+              {/* Popout button */}
+              {popoutAPI && (
+                <button
+                  onClick={async () => {
+                    await popoutAPI.open(selectedAgentId || undefined);
+                    setPopoutOpen(true);
+                  }}
+                  title="Open panel in new window"
+                  className="px-2 py-2 text-[10px] cursor-pointer transition-colors text-gray-500 hover:text-gray-300"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <polyline points="15 3 21 3 21 9" />
+                    <line x1="10" y1="14" x2="21" y2="3" />
+                    <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+                  </svg>
+                </button>
               )}
             </div>
             {/* Row 2: agent-contextual tabs — only when an agent is selected */}
@@ -1526,6 +1791,187 @@ function HirePromptModal({
             ✨ Generate
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Popout panel — pure mirror of the main window's right panel.
+ * All state comes from props (pushed by main window). User actions
+ * relay back to the main window via callbacks.
+ */
+function PopoutPanel({
+  agents,
+  selectedAgent,
+  selectedAgentId,
+  rightPanel,
+  workspaceDir,
+  skills,
+  agentTeamsEnabled,
+  autoApproveAll,
+  debugMode,
+  backgroundTasks,
+  onSelectAgent,
+  onSetRightPanel,
+  onInterceptSend,
+  onSaveAgent,
+  onDeleteAgent,
+}: {
+  agents: Agent[];
+  selectedAgent: Agent | null;
+  selectedAgentId: string | null;
+  rightPanel: RightPanel;
+  workspaceDir: string | null;
+  skills: AgentSkill[];
+  agentTeamsEnabled: boolean;
+  autoApproveAll: boolean;
+  debugMode: boolean;
+  backgroundTasks: BackgroundTask[];
+  onSelectAgent: (id: string) => void;
+  onSetRightPanel: (panel: RightPanel) => void;
+  onInterceptSend: (text: string) => void;
+  onSaveAgent: (agent: Agent) => void;
+  onDeleteAgent: (agentId: string) => void;
+}) {
+  return (
+    <div className="flex flex-col h-screen bg-slate-950 text-slate-100 overflow-hidden">
+      {/* Agent selector bar */}
+      <div className="shrink-0 border-b border-slate-700 bg-slate-900/95 px-3 py-1.5 flex items-center gap-2">
+        <span className="text-[10px] font-pixel text-slate-500 shrink-0">
+          Agent:
+        </span>
+        <div className="flex gap-1 overflow-x-auto flex-1">
+          {agents.map((a) => (
+            <button
+              key={a.id}
+              onClick={() => onSelectAgent(a.id)}
+              className={`px-2 py-1 rounded text-[10px] font-pixel cursor-pointer transition-colors shrink-0 ${
+                selectedAgentId === a.id
+                  ? "bg-slate-700 text-white"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+              }`}
+              style={
+                selectedAgentId === a.id
+                  ? { borderBottom: `2px solid ${a.color}` }
+                  : undefined
+              }
+            >
+              <span style={{ color: a.color }}>{a.name}</span>
+              {a.status !== "idle" && (
+                <span
+                  className="ml-1 inline-block w-1.5 h-1.5 rounded-full animate-pulse"
+                  style={{ backgroundColor: a.color }}
+                />
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab bar */}
+      <div className="border-b border-gray-800 shrink-0">
+        <div className="flex">
+          {(["chat", "workspace", "git", "terminal"] as const).map((key) => {
+            const label =
+              key === "workspace"
+                ? "Files"
+                : key === "terminal"
+                  ? "Term"
+                  : key === "git"
+                    ? "Git"
+                    : "Chat";
+            return (
+              <button
+                key={key}
+                onClick={() => onSetRightPanel(key)}
+                className={`flex-1 py-2 text-[10px] font-pixel cursor-pointer leading-relaxed transition-colors ${rightPanel === key ? "text-white border-b-2 border-indigo-500 bg-gray-800" : "text-gray-500 hover:text-gray-300"}`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {selectedAgent && (
+          <div className="flex items-center border-t border-gray-800/50">
+            <span
+              className="text-[10px] font-pixel text-slate-400 pl-2 pr-1 py-1.5 shrink-0 truncate max-w-[40%]"
+              style={{ color: selectedAgent.color }}
+            >
+              {selectedAgent.name}
+            </span>
+            {(["editor", "tasks"] as const).map((key) => {
+              const label = key === "editor" ? "Config" : "Tasks";
+              return (
+                <button
+                  key={key}
+                  onClick={() => onSetRightPanel(key)}
+                  className={`flex-1 py-1.5 text-[10px] font-pixel leading-relaxed cursor-pointer transition-colors ${rightPanel === key ? "text-white border-b-2 border-indigo-500 bg-gray-800" : "text-gray-500 hover:text-gray-300"}`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Panel content */}
+      <div className="flex-1 overflow-hidden relative">
+        {/* ChatWindow — real component with send intercepted */}
+        <div
+          className={`absolute inset-0 ${rightPanel === "chat" ? "" : "invisible pointer-events-none"}`}
+        >
+          <ChatWindow
+            agent={selectedAgent}
+            agents={agents}
+            skills={skills}
+            onUpdateAgent={() => {}}
+            onAddAgent={() => {}}
+            agentTeamsEnabled={agentTeamsEnabled}
+            autoApprovePermissions={autoApproveAll}
+            debugMode={debugMode}
+            backgroundTasks={backgroundTasks}
+            onStartBackgroundTask={() => {}}
+            onInterceptSend={onInterceptSend}
+          />
+        </div>
+        {/* Workspace */}
+        <div
+          className={`absolute inset-0 ${rightPanel === "workspace" ? "" : "invisible pointer-events-none"}`}
+        >
+          <WorkspacePanel workspaceDir={workspaceDir} />
+        </div>
+        {/* Git */}
+        <div
+          className={`absolute inset-0 ${rightPanel === "git" ? "" : "invisible pointer-events-none"}`}
+        >
+          <GitPanel workspaceDir={workspaceDir} />
+        </div>
+        {/* Terminal */}
+        <div
+          className={`absolute inset-0 ${rightPanel === "terminal" ? "" : "invisible pointer-events-none"}`}
+        >
+          <TerminalPanel agents={agents} workspaceDir={workspaceDir} />
+        </div>
+        {/* Editor */}
+        {rightPanel === "editor" && selectedAgent && (
+          <div className="absolute inset-0">
+            <AgentEditor
+              agent={selectedAgent}
+              workspaceDir={workspaceDir || undefined}
+              onSave={onSaveAgent}
+              onDelete={onDeleteAgent}
+              onClose={() => onSetRightPanel("chat")}
+            />
+          </div>
+        )}
+        {/* Tasks — read-only */}
+        {rightPanel === "tasks" && (
+          <div className="absolute inset-0">
+            <AgentTasks agent={selectedAgent} onUpdateAgent={() => {}} />
+          </div>
+        )}
       </div>
     </div>
   );
