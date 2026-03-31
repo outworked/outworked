@@ -18,6 +18,9 @@ const NAVIGATE_SETTLE_MS = 2000;
 // Milliseconds to wait after a click for any resulting navigation/render
 const CLICK_SETTLE_MS = 800;
 
+// Milliseconds to wait between each keystroke in browse:type
+const TYPE_CHAR_DELAY_MS = 30;
+
 // Maximum characters of page text returned by browse:navigate
 const TEXT_TRUNCATE_LIMIT = 8000;
 
@@ -243,6 +246,38 @@ class BrowserRuntime extends BaseRuntime {
         },
       },
       this._fill,
+    );
+
+    this.registerTool(
+      "browse:type",
+      {
+        name: "browse:type",
+        description:
+          "Type text into the currently focused element using simulated keyboard input. Unlike browse:fill (which sets .value), this sends real key-press events through Chromium's input pipeline, working with contentEditable fields, rich text editors, and sites like Twitter that ignore programmatic value changes. Focus the target element first with browse:click.",
+        parameters: {
+          type: "object",
+          properties: {
+            text: {
+              type: "string",
+              description: "Text to type into the focused element",
+            },
+            selector: {
+              type: "string",
+              description:
+                "Optional CSS selector — if provided, the element will be clicked to focus it before typing",
+            },
+            clearFirst: {
+              type: "boolean",
+              description:
+                "If true, select all existing text (Cmd+A) and delete it before typing (default: false)",
+            },
+            agentId: { type: "string", description: "Agent ID" },
+          },
+          required: ["text"],
+        },
+      },
+      this._type,
+      { timeout: 60_000 },
     );
 
     this.registerTool(
@@ -582,6 +617,57 @@ class BrowserRuntime extends BaseRuntime {
       );
     }
     return `Filled ${selector} with value`;
+  }
+
+  async _type({ text, selector, clearFirst, agentId }) {
+    const win = this._getOrCreateWindow(agentId || "default");
+    const wc = win.webContents;
+
+    // Optionally click the target element to focus it first
+    if (selector) {
+      const found = await wc.executeJavaScript(`
+        (() => {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return false;
+          el.scrollIntoView({ block: 'center', behavior: 'instant' });
+          el.focus();
+          el.click();
+          return true;
+        })()
+      `);
+      if (!found) {
+        throw new Error(`Element not found: ${selector}`);
+      }
+      await _sleep(100);
+    }
+
+    // Optionally clear existing content with Cmd+A then Backspace
+    if (clearFirst) {
+      wc.sendInputEvent({ type: "keyDown", keyCode: "a", modifiers: ["meta"] });
+      wc.sendInputEvent({ type: "keyUp", keyCode: "a", modifiers: ["meta"] });
+      await _sleep(50);
+      wc.sendInputEvent({ type: "keyDown", keyCode: "Backspace" });
+      wc.sendInputEvent({ type: "keyUp", keyCode: "Backspace" });
+      await _sleep(50);
+    }
+
+    // Type each character using sendInputEvent — this goes through Chromium's
+    // native input pipeline, triggering keydown/keypress/textInput/input/keyup
+    // exactly like a physical keyboard.
+    for (const char of text) {
+      if (char === "\n") {
+        wc.sendInputEvent({ type: "keyDown", keyCode: "Return" });
+        wc.sendInputEvent({ type: "char", keyCode: "\r" });
+        wc.sendInputEvent({ type: "keyUp", keyCode: "Return" });
+      } else {
+        wc.sendInputEvent({ type: "keyDown", keyCode: char });
+        wc.sendInputEvent({ type: "char", keyCode: char });
+        wc.sendInputEvent({ type: "keyUp", keyCode: char });
+      }
+      await _sleep(TYPE_CHAR_DELAY_MS);
+    }
+
+    return `Typed ${text.length} character(s) into focused element.`;
   }
 
   async _evaluate({ script, agentId }) {
