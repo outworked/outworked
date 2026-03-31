@@ -15,14 +15,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/outworked/outworked/releases/download/v0.4.0/Outworked-0.4.0-arm64.dmg">
-    <img src="https://img.shields.io/badge/Download_for_macOS-v0.4.0-brightgreen?style=for-the-badge&logo=apple" alt="Download for macOS" />
+  <a href="https://github.com/outworked/outworked/releases/download/v0.4.1/Outworked-0.4.1-arm64.dmg">
+    <img src="https://img.shields.io/badge/Download_for_macOS-v0.4.1-brightgreen?style=for-the-badge&logo=apple" alt="Download for macOS" />
   </a>
 </p>
 
 <p align="center">
   <a href="https://github.com/outworked/outworked/stargazers"><img src="https://img.shields.io/github/stars/outworked/outworked?style=social" alt="GitHub Stars" /></a>
-  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.4.0-green.svg" alt="Version" /></a>
+  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.4.1-green.svg" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%203.0-blue.svg" alt="License: GPL-3.0" /></a>
   <img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="Platform" />
 </p>
@@ -134,7 +134,7 @@ Three agents working simultaneously, finishing in minutes what would take you ho
 - **Skills System** — Extend agents with plug-in `SKILL.md` files that define tools, auth, and instructions
 - **SQLite Storage** — Persistent local database for skills, settings, channels, and message history
 - **Permission Gates** — Real-time approval modal for sensitive tool calls
-- **Live Chat** — Markdown-rendered conversations with syntax-highlighted code blocks and diffs
+- **Live Chat** — Markdown-rendered conversations with syntax-highlighted code blocks and diffs. Pop out any chat into its own window for side-by-side work
 - **Built-in Git** — View status, staged changes, branches, and create PRs without leaving the app
 - **File Browser** — Live-updating workspace tree that syncs as agents edit files
 - **Cost Dashboard** — Track tokens and spend per agent, session, and day
