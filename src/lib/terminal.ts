@@ -43,6 +43,11 @@ interface ClaudeCodeAPI {
       },
     ) => void,
   ) => () => void;
+  onPermissionResolved: (
+    cb: (permId: string, allow: boolean) => void,
+  ) => () => void;
+  broadcastStop: (agentId: string) => void;
+  onStopRequested: (cb: (agentId: string) => void) => () => void;
   onChunk: (cb: (reqId: number, data: string) => void) => () => void;
   onEvent: (cb: (reqId: number, event: ClaudeCodeEvent) => void) => () => void;
   onStderr: (cb: (reqId: number, data: string) => void) => () => void;
@@ -191,6 +196,19 @@ export interface ClaudeCodeEvent {
   };
 }
 
+export interface PopoutAPI {
+  open: (agentId?: string) => Promise<{ ok: boolean; reused?: boolean }>;
+  close: () => Promise<{ ok: boolean }>;
+  isOpen: () => Promise<boolean>;
+  pushState: (data: unknown) => void;
+  sendAction: (action: unknown) => void;
+  signalReady: () => void;
+  onReady: (cb: () => void) => () => void;
+  onStateUpdate: (cb: (data: unknown) => void) => () => void;
+  onAction: (cb: (action: unknown) => void) => () => void;
+  onClosed: (cb: () => void) => () => void;
+}
+
 interface ElectronAPI {
   isElectron: boolean;
   platform: string;
@@ -255,6 +273,7 @@ interface ElectronAPI {
     onUpdateDownloaded: (cb: (info: { version: string }) => void) => () => void;
     onError: (cb: (message: string) => void) => () => void;
   };
+  popout?: PopoutAPI;
   git?: {
     isRepo: (cwd?: string) => Promise<{ ok: boolean; isRepo: boolean }>;
     status: (cwd?: string) => Promise<GitStatusResult>;
@@ -712,6 +731,27 @@ export function onClaudePermissionRequest(
       agentName: raw.agentName,
     });
   });
+}
+
+export function onClaudePermissionResolved(
+  cb: (permId: string, allow: boolean) => void,
+): () => void {
+  const api = getAPI();
+  if (!api?.claudeCode?.onPermissionResolved) return () => {};
+  return api.claudeCode.onPermissionResolved(cb);
+}
+
+export function broadcastStopAgent(agentId: string): void {
+  const api = getAPI();
+  api?.claudeCode?.broadcastStop?.(agentId);
+}
+
+export function onStopAgentRequested(
+  cb: (agentId: string) => void,
+): () => void {
+  const api = getAPI();
+  if (!api?.claudeCode?.onStopRequested) return () => {};
+  return api.claudeCode.onStopRequested(cb);
 }
 
 export async function readClaudeAgentFiles(

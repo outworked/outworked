@@ -1,6 +1,6 @@
 {
   "name": "outworked",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "AI agent orchestration tool",
   "author": "Outworked Team",
   "private": true,
@@ -20,7 +20,8 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.85",
     "better-sqlite3": "^12.8.0",
-    "electron-updater": "^6.8.3"
+    "electron-updater": "^6.8.3",
+    "extract-zip": "^2.0.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

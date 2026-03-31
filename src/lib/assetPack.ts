@@ -143,7 +143,9 @@ export function normalizeFurnitureItem(
 
 /** Get the URL for a furniture item PNG. */
 export function furnitureItemUrl(packId: string, config: FurnitureItemConfig): string {
-  return `user-assets://${packId}/${config.file}`;
+  const encodedId = encodeURIComponent(packId);
+  const encodedFile = config.file.split("/").map(encodeURIComponent).join("/");
+  return `user-assets://${encodedId}/${encodedFile}`;
 }
 
 /**
@@ -162,7 +164,9 @@ export function resolveEmployeeSheetUrl(
   const sheetPath = employees.sheets[role] ?? employees.sheets["default"];
   if (!sheetPath) return null;
 
-  return `user-assets://${pack.id}/${sheetPath}`;
+  const encodedId = encodeURIComponent(pack.id);
+  const encodedPath = sheetPath.split("/").map(encodeURIComponent).join("/");
+  return `user-assets://${encodedId}/${encodedPath}`;
 }
 
 // ─── Custom Font ───────────────────────────────────────────────
@@ -191,7 +195,7 @@ export async function applyCustomFont(
 
   const config = typeof fontCat === "string" ? { file: fontCat } : fontCat;
   const fontName = config.name ?? "CustomPixelFont";
-  const url = `user-assets://${pack.id}/${config.file}`;
+  const url = `user-assets://${encodeURIComponent(pack.id)}/${config.file.split("/").map(encodeURIComponent).join("/")}`;
 
   // Determine format from extension
   const ext = config.file.split(".").pop()?.toLowerCase();

@@ -2,13 +2,18 @@ import { useEffect, useState } from "react";
 import MarkdownMessage from "../MarkdownMessage";
 
 interface ElectronMusicAPI {
-  music: { getReadme: () => Promise<string> };
+  music: { getReadme: () => Promise<string>; openFolder: () => Promise<void> };
   isElectron: boolean;
 }
 
 function getReadmeAPI(): (() => Promise<string>) | null {
   const w = window as unknown as { electronAPI?: ElectronMusicAPI };
   return w.electronAPI?.isElectron ? w.electronAPI.music.getReadme : null;
+}
+
+function getOpenFolderAPI(): (() => Promise<void>) | null {
+  const w = window as unknown as { electronAPI?: ElectronMusicAPI };
+  return w.electronAPI?.isElectron ? w.electronAPI.music.openFolder : null;
 }
 
 /** Strip everything from the `<details>` block onward (developer notes). */
@@ -70,6 +75,18 @@ export default function MusicInfoModal({
             </div>
           )}
         </div>
+
+        {/* Footer */}
+        {getOpenFolderAPI() && (
+          <div className="flex justify-end gap-2 px-4 py-3 border-t border-slate-700">
+            <button
+              onClick={() => getOpenFolderAPI()?.()}
+              className="btn-pixel text-[9px] py-1.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded cursor-pointer font-pixel"
+            >
+              Open Folder
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

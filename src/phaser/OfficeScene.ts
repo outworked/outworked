@@ -192,7 +192,7 @@ export class OfficeScene extends Phaser.Scene {
           const entries = Object.entries(sheets);
           const loaded = await Promise.all(
             entries.map(async ([role, relPath]) => {
-              const url = `user-assets://${pack.id}/${relPath}`;
+              const url = `user-assets://${encodeURIComponent(pack.id)}/${relPath.split("/").map(encodeURIComponent).join("/")}`;
               try {
                 const canvas = await loadSpriteSheetImage(url);
                 return [role, canvas] as const;
@@ -213,7 +213,7 @@ export class OfficeScene extends Phaser.Scene {
           if (bgCat) {
             const bgConfig = typeof bgCat === "string" ? { file: bgCat } : bgCat;
             this.backgroundMode = bgConfig.mode ?? "cover";
-            const bgUrl = `user-assets://${pack.id}/${bgConfig.file}`;
+            const bgUrl = `user-assets://${encodeURIComponent(pack.id)}/${bgConfig.file.split("/").map(encodeURIComponent).join("/")}`;
             try {
               this.cachedBackground = await loadSpriteSheetImage(bgUrl);
             } catch {

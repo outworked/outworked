@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { PermissionRequest } from "../lib/terminal";
 
 interface PermissionModalProps {
@@ -28,7 +29,7 @@ export default function PermissionModal({
     }
   }
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
       <div
         ref={modalRef}
@@ -98,6 +99,7 @@ export default function PermissionModal({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
