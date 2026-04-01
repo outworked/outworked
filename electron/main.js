@@ -409,10 +409,10 @@ function syncCaffeinate() {
   const hasChannels = _hasConnectedChannels();
   const hasSessions = sdkBridge.hasActiveSessions();
   const hasScheduled = _hasEnabledScheduledTasks();
-  if (hasChannels) {
-    // Channels need the stronger blocker to prevent system sleep
+  if (hasSessions) {
+    // Active sessions need the stronger blocker to keep display on
     caffeineStart("prevent-display-sleep");
-  } else if (hasSessions || hasScheduled) {
+  } else if (hasChannels || hasScheduled) {
     caffeineStart("prevent-app-suspension");
   } else {
     caffeineStop();

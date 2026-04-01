@@ -409,6 +409,7 @@ function ScheduledTaskCard({
   agents: Agent[];
   onDelete: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const enabled = !!task.enabled;
   const targetAgent = task.agent_id
     ? agents.find((a) => a.id === task.agent_id)
@@ -439,6 +440,8 @@ function ScheduledTaskCard({
   const nextRunLabel = task.next_run_at
     ? formatRelativeTime(task.next_run_at)
     : "—";
+
+  const isLongPrompt = !!task.prompt && task.prompt.length > 80;
 
   return (
     <div
@@ -476,10 +479,19 @@ function ScheduledTaskCard({
       </div>
       <div className="flex items-center mt-1.5">
         {task.prompt && (
-          <p className="text-[9px] text-slate-500 truncate flex-1">
-            {task.prompt.slice(0, 80)}
-            {task.prompt.length > 80 ? "..." : ""}
-          </p>
+          <button
+            onClick={() => isLongPrompt && setExpanded((p) => !p)}
+            className={`text-[9px] text-slate-500 text-left flex-1 ${
+              isLongPrompt ? "cursor-pointer hover:text-slate-400" : ""
+            } ${expanded ? "" : "truncate"}`}
+          >
+            {expanded ? "" : (
+              <>
+                {task.prompt.slice(0, 80)}
+                {isLongPrompt ? "..." : ""}
+              </>
+            )}
+          </button>
         )}
         <button
           onClick={onDelete}
@@ -488,6 +500,11 @@ function ScheduledTaskCard({
           Delete
         </button>
       </div>
+      {expanded && task.prompt && (
+        <pre className="text-[9px] text-slate-400 mt-1.5 whitespace-pre-wrap break-words bg-slate-900/50 rounded px-2 py-1.5 border border-slate-700/30 max-h-[200px] overflow-y-auto">
+          {task.prompt}
+        </pre>
+      )}
     </div>
   );
 }

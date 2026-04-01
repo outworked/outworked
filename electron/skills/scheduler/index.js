@@ -505,7 +505,7 @@ function _formatTask(t) {
     schedule: t.schedule,
     enabled: !!t.enabled,
     agentId: t.agentId,
-    prompt: t.prompt?.slice(0, 200),
+    prompt: t.prompt,
     runCount: t.runCount || 0,
     lastRunAt: t.lastRunAt ? new Date(t.lastRunAt).toISOString() : null,
     nextRunAt: t.nextRunAt ? new Date(t.nextRunAt).toISOString() : null,

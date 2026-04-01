@@ -396,12 +396,13 @@ export default function App() {
       };
       if (a.type === "selectAgent") {
         setSelectedAgentId(a.agentId || null);
-      } else if (a.type === "sendMessage" && a.agentId && a.text) {
+      } else if ((a.type === "sendMessage" || a.type === "sendBackgroundMessage") && a.agentId && a.text) {
         setSelectedAgentId(a.agentId);
         setRightPanel("chat");
         setPendingMessage({
           text: a.text,
           nonce: a.nonce || crypto.randomUUID(),
+          background: a.type === "sendBackgroundMessage" || undefined,
         });
       } else if (a.type === "setPanel" && a.panel) {
         setRightPanel(a.panel);
@@ -483,6 +484,8 @@ export default function App() {
   const [pendingMessage, setPendingMessage] = useState<{
     text: string;
     nonce: string;
+    forceNewSession?: boolean;
+    background?: boolean;
   } | null>(null);
 
   useEffect(() => {
@@ -496,7 +499,7 @@ export default function App() {
               triggerName: string;
               agentId: string | null;
               prompt: string;
-              context?: unknown;
+              context?: { scheduled?: boolean; taskId?: string };
             }) => void,
           ) => () => void;
         };
@@ -523,7 +526,11 @@ export default function App() {
       // Select the target agent and inject the prompt
       setSelectedAgentId(targetAgent.id);
       setRightPanel("chat");
-      setPendingMessage({ text: data.prompt, nonce: crypto.randomUUID() });
+      setPendingMessage({
+        text: data.prompt,
+        nonce: crypto.randomUUID(),
+        forceNewSession: !!data.context?.scheduled,
+      });
 
       // Update agent status to show it's handling a channel message
       setAgents((prev) =>
@@ -1016,10 +1023,10 @@ export default function App() {
         onSetRightPanel={(panel) => {
           popoutAPI?.sendAction({ type: "setPanel", panel });
         }}
-        onInterceptSend={(text) => {
+        onInterceptSend={(text, options) => {
           if (!selectedAgent) return;
           popoutAPI?.sendAction({
-            type: "sendMessage",
+            type: options?.background ? "sendBackgroundMessage" : "sendMessage",
             agentId: selectedAgent.id,
             text,
             nonce: crypto.randomUUID(),
@@ -1830,7 +1837,7 @@ function PopoutPanel({
   backgroundTasks: BackgroundTask[];
   onSelectAgent: (id: string) => void;
   onSetRightPanel: (panel: RightPanel) => void;
-  onInterceptSend: (text: string) => void;
+  onInterceptSend: (text: string, options?: { background?: boolean }) => void;
   onSaveAgent: (agent: Agent) => void;
   onDeleteAgent: (agentId: string) => void;
 }) {

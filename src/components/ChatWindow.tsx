@@ -72,13 +72,13 @@ interface ChatWindowProps {
   ) => void;
   autoApprovePermissions?: boolean;
   /** Programmatically injected message (e.g. from a trigger). Consumed once. */
-  pendingMessage?: { text: string; nonce: string } | null;
+  pendingMessage?: { text: string; nonce: string; forceNewSession?: boolean; background?: boolean } | null;
   onPendingMessageConsumed?: () => void;
   /**
    * If provided, called instead of the built-in send logic.
    * Used by the popout window to relay messages to the main window.
    */
-  onInterceptSend?: (text: string) => void;
+  onInterceptSend?: (text: string, options?: { background?: boolean }) => void;
 }
 
 const EMPTY_KEYS = { openai: "", anthropic: "", gemini: "", github: "" };
@@ -234,9 +234,67 @@ export default function ChatWindow({
     ) {
       pendingNonceRef.current = pendingMessage.nonce;
       const text = pendingMessage.text;
+      onPendingMessageConsumed?.();
+
+      // Background tasks (from popout relay or scheduled triggers) run in a
+      // separate session so they don't block the user's current conversation.
+      if (pendingMessage.background || pendingMessage.forceNewSession) {
+        const agentId = agent.id;
+        const taskAgent: Agent = {
+          ...agent,
+          history: [],
+          currentSessionId: undefined,
+          sessionId: undefined,
+        };
+        const bgTask: BackgroundTask = {
+          id: crypto.randomUUID(),
+          agentId,
+          agentName: agent.name,
+          prompt: text,
+          status: "running",
+          startedAt: Date.now(),
+        };
+        const liveAgent = () =>
+          agentsRef.current.find((a) => a.id === agentId) || agent;
+        const execute = async (): Promise<{ reply: string; agent: Agent }> => {
+          const result = await sendMessage(
+            taskAgent,
+            text,
+            EMPTY_KEYS,
+            (partial) => {
+              onUpdateAgent({
+                ...liveAgent(),
+                currentThought: `🔄 ${tailThought(partial, 60)}`,
+              });
+            },
+            undefined,
+            {
+              skills,
+              onClaudeCodeEvent: taskAgent.subagentDef
+                ? (event) => {
+                    if (event.type === "tool_use" && event.toolName) {
+                      const label = `${event.toolName}${event.toolInput?.file_path ? ` ${event.toolInput.file_path}` : ""}`;
+                      onUpdateAgent({
+                        ...liveAgent(),
+                        currentThought: `🔄 ${label}`,
+                      });
+                    }
+                  }
+                : undefined,
+              onPermissionRequest: (request) => {
+                handleIncomingPermission(request, taskAgent.name);
+              },
+            },
+          );
+          const reply = result.text;
+          return { reply, agent: { ...liveAgent(), currentThought: tailThought(reply, 80) } };
+        };
+        onStartBackgroundTask(bgTask, execute);
+        return;
+      }
+
       pendingAutoSendRef.current = text;
       setInput(text);
-      onPendingMessageConsumed?.();
 
       // Retry until handleSendRef is the real handleSend (set later in the
       // component body). Gives up after 2s to avoid infinite loops.
@@ -590,12 +648,15 @@ export default function ChatWindow({
       // set up todos on the boss. Use the current agent state (via agentsRef) to
       // avoid overwriting those with the stale pre-orchestration updatedWithUser.
       const currentState = agentsRef.current.find((a) => a.id === updatedWithUser.id) || updatedWithUser;
+      // updatedWithUser.sessionId is set via mutation inside invokeClaudeCode
+      // after the first message — prefer it so follow-ups resume the same session.
+      const resolvedSessionId = bossSessionId || updatedWithUser.sessionId;
       const finalAgent: Agent = {
         ...currentState,
         // Preserve orchestration todos — updatedWithUser has stale pre-orchestration state
         ...(orchestrationTodos && { todos: orchestrationTodos }),
         // Preserve Claude Code sessionId so follow-ups resume the same session
-        ...(bossSessionId && { sessionId: bossSessionId }),
+        ...(resolvedSessionId && { sessionId: resolvedSessionId }),
         history: [...updatedWithUser.history, assistantMsg],
         status: "idle",
         currentThought: tailThought(reply, 80),
@@ -2112,92 +2173,75 @@ export default function ChatWindow({
 
   function handleSendBackground() {
     if (!input.trim() || isStreaming || !agent || agent.isBoss) return;
+    // Popout mode: relay the background request to the main window
+    if (onInterceptSend) {
+      const text = input.trim();
+      setInput("");
+      onInterceptSend(text, { background: true });
+      return;
+    }
     const userText = input.trim();
+    const agentId = agent.id;
     setInput("");
 
-    const userMsg: Message = {
-      role: "user",
-      content: userText,
-      timestamp: Date.now(),
-    };
-
-    // Create a new session if needed
-    let sessionId = agent.currentSessionId;
-    if (!sessionId) {
-      const session = createSession(agent.id, userText);
-      sessionId = session.id;
-    }
-
-    const updatedWithUser: Agent = {
+    // Don't change agent status or history — bg tasks run in a separate
+    // session so the user can keep chatting with the agent.
+    const taskAgent: Agent = {
       ...agent,
-      history: [...agent.history, userMsg],
-      status: "background" as AgentStatus,
-      currentThought: `🔄 Background: ${userText.slice(0, 50)}...`,
-      currentSessionId: sessionId,
+      history: [],
+      currentSessionId: undefined,
+      sessionId: undefined,
     };
-    onUpdateAgent(updatedWithUser);
 
-    const taskId = crypto.randomUUID();
     const bgTask: BackgroundTask = {
-      id: taskId,
-      agentId: agent.id,
+      id: crypto.randomUUID(),
+      agentId,
       agentName: agent.name,
       prompt: userText,
       status: "running",
       startedAt: Date.now(),
     };
 
-    // Create the execution function — App will run it and handle completion
+    const liveAgent = () =>
+      agentsRef.current.find((a) => a.id === agentId) || agent;
+
     const execute = async (): Promise<{ reply: string; agent: Agent }> => {
       const otherAgents = agents.filter(
-        (a) => a.id !== updatedWithUser.id && !a.isBoss,
+        (a) => a.id !== agentId && !a.isBoss,
       );
       const result = await sendMessage(
-        updatedWithUser,
+        taskAgent,
         userText,
         EMPTY_KEYS,
         (partial) => {
           onUpdateAgent({
-            ...updatedWithUser,
-            status: "background" as AgentStatus,
+            ...liveAgent(),
             currentThought: `🔄 ${tailThought(partial, 60)}`,
           });
         },
         undefined, // no abort signal for background tasks
         {
           skills,
-          onClaudeCodeEvent: updatedWithUser.subagentDef
+          onClaudeCodeEvent: taskAgent.subagentDef
             ? (event) => {
                 if (event.type === "tool_use" && event.toolName) {
                   const label = `${event.toolName}${event.toolInput?.file_path ? ` ${event.toolInput.file_path}` : ""}`;
                   onUpdateAgent({
-                    ...updatedWithUser,
-                    status: "background" as AgentStatus,
+                    ...liveAgent(),
                     currentThought: `🔄 ${label}`,
                   });
                 }
               }
             : undefined,
           onPermissionRequest: (request) => {
-            handleIncomingPermission(request, updatedWithUser.name);
+            handleIncomingPermission(request, taskAgent.name);
           },
           colleagues: otherAgents.map((a) => ({ name: a.name, role: a.role })),
         },
       );
 
       const reply = result.text;
-      const assistantMsg: Message = {
-        role: "assistant",
-        content: reply,
-        timestamp: Date.now(),
-      };
-      const finalAgent: Agent = {
-        ...updatedWithUser,
-        history: [...updatedWithUser.history, assistantMsg],
-        status: "idle",
-        currentThought: tailThought(reply, 80),
-      };
-      return { reply, agent: finalAgent };
+      return { reply, agent: { ...liveAgent(), currentThought: tailThought(reply, 80) } };
     };
 
     onStartBackgroundTask(bgTask, execute);
